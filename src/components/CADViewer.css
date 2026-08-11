@@ -152,6 +152,7 @@
 .cad-viewer.is-capturing .drop-overlay,
 .cad-viewer.is-capturing .measure-label,
 .cad-viewer.is-capturing .print-layer-panel,
+.cad-viewer.is-capturing .support-panel,
 .cad-viewer.is-capturing .anim-timeline {
   visibility: hidden !important;
   opacity: 0 !important;
@@ -338,6 +339,68 @@
 
 .print-layer-legend .lg-overhang {
   color: #ff6b6b;
+}
+
+/* —— Auto support panel —— */
+.support-panel {
+  position: absolute;
+  top: 72px;
+  left: 12px;
+  z-index: 12;
+  width: min(300px, calc(100% - 24px));
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(16, 16, 18, 0.72);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: clip-panel-in 0.18s ease-out;
+}
+
+.support-panel.with-tree {
+  left: min(308px, calc(100vw - 24px));
+}
+
+.support-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.support-panel-header strong {
+  display: block;
+  font-size: 13px;
+  color: #f0f0f0;
+}
+
+.support-panel-header p {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: rgba(220, 220, 220, 0.55);
+}
+
+.support-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: rgba(230, 230, 230, 0.7);
+}
+
+.support-field input[type='range'] {
+  width: 100%;
+  accent-color: #00bcd4;
+}
+
+.support-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 /* —— Animation timeline —— */

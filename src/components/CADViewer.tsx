@@ -56,6 +56,11 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { loadOcctContent, type OcctLoadProgress } from '../lib/loadOcctModel'
+import {
+  clearSupportPillars,
+  generateSupportPillars,
+  isSupportObject,
+} from '../lib/generateSupports'
 import ViewCube, { CameraOrientationPublisher } from './ViewCube'
 import './CADViewer.css'
 
@@ -152,6 +157,7 @@ function buildAssemblyParts(root: Object3D): AssemblyPart[] {
   root.traverse((child) => {
     if (!(child as Mesh).isMesh) return
     if (child.name === 'selection-highlight') return
+    if (isSupportObject(child)) return
 
     index += 1
     const mesh = child as Mesh
@@ -242,6 +248,7 @@ function collectRenderableMeshes(root: Object3D): Mesh[] {
     if (child.name === 'selection-highlight') return
     if (child.name.startsWith('clip-stencil')) return
     if (child.name.startsWith('clip-cap')) return
+    if (isSupportObject(child)) return
     meshes.push(child as Mesh)
   })
   return meshes
@@ -1549,6 +1556,7 @@ function collectModelMeshes(root: Object3D): Mesh[] {
     if (child.name === 'selection-highlight') return
     if (child.name.startsWith('clip-stencil')) return
     if (child.name.startsWith('clip-cap')) return
+    if (isSupportObject(child)) return
     meshes.push(child as Mesh)
   })
   return meshes
@@ -1982,6 +1990,11 @@ export default function CADViewer() {
   const [renderTransparent, setRenderTransparent] = useState(false)
   const [printAnalysisActive, setPrintAnalysisActive] = useState(false)
   const [printLayerHeight, setPrintLayerHeight] = useState(0)
+  const [supportPanelOpen, setSupportPanelOpen] = useState(false)
+  const [supportAngle, setSupportAngle] = useState(45)
+  const [supportDensity, setSupportDensity] = useState(0.45)
+  const [supportRadius, setSupportRadius] = useState(1.5)
+  const [supportCount, setSupportCount] = useState(0)
   const [cadLoading, setCadLoading] = useState(false)
   const [cadLoadProgress, setCadLoadProgress] = useState(0)
   const [cadLoadStage, setCadLoadStage] = useState('')
@@ -2161,6 +2174,8 @@ export default function CADViewer() {
         setClipMasterEnabled(false)
         setPrintAnalysisActive(false)
         setPrintLayerHeight(bounds.max.y)
+        setSupportPanelOpen(false)
+        setSupportCount(0)
         setAnimPlaying(false)
         setAnimTime(0)
         setAnimDuration(0)
@@ -2174,7 +2189,11 @@ export default function CADViewer() {
         setFocusObject(null)
         setTreePanelOpen(parts.length > 0)
         setModel((prev) => {
-          if (prev) disposeObject(prev.root)
+          if (prev) {
+            clearSupportPillars(prev.root.parent ?? prev.root)
+            clearSupportPillars(prev.root)
+            disposeObject(prev.root)
+          }
           return loaded
         })
         setStatus(
@@ -2386,6 +2405,9 @@ export default function CADViewer() {
 
   const onRotate = (axis: Axis) => {
     if (!model) return
+    clearSupportPillars(model.root.parent ?? model.root)
+    clearSupportPillars(model.root)
+    setSupportCount(0)
     const next = rotateModelAxis(model, axis)
     if (printAnalysisActive) {
       applyPrintOverhangAnalysis(next.root)
@@ -2440,6 +2462,43 @@ export default function CADViewer() {
       return true
     })
   }, [viewMode])
+
+  const clearSupports = useCallback(() => {
+    const root = modelRef.current?.root
+    if (!root) return
+    clearSupportPillars(root.parent ?? root)
+    clearSupportPillars(root)
+    setSupportCount(0)
+    setStatus('Destek çubukları temizlendi')
+  }, [])
+
+  const createSupports = useCallback(() => {
+    const root = modelRef.current?.root
+    if (!root) return
+    try {
+      // Attach beside model root so supports stay in scene space
+      const parent = root.parent ?? root
+      const { count } = generateSupportPillars(
+        root,
+        {
+          overhangAngleDeg: supportAngle,
+          density: supportDensity,
+          pillarRadius: supportRadius,
+        },
+        parent,
+      )
+      setSupportCount(count)
+      setSupportPanelOpen(true)
+      setStatus(
+        count > 0
+          ? `${count} destek çubuğu oluşturuldu (${supportAngle}° / Ø${supportRadius} mm)`
+          : 'Destek gerektiren yüzey bulunamadı — açıyı düşürmeyi deneyin',
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Destek oluşturulamadı.'
+      setError(message)
+    }
+  }, [supportAngle, supportDensity, supportRadius])
 
   const onModelInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -2765,6 +2824,16 @@ export default function CADViewer() {
             disabled={!model}
             title="Ters açı / destek analizi ve katman dilimleme"
           />
+          <ToolbarButton
+            label="Destek Çubuğu Ekle"
+            active={supportPanelOpen}
+            onClick={() => {
+              setSupportPanelOpen(true)
+              createSupports()
+            }}
+            disabled={!model}
+            title="Otomatik destek çubuğu oluştur"
+          />
         </div>
 
         <div className="tb-divider" />
@@ -2832,6 +2901,70 @@ export default function CADViewer() {
           <div className="print-layer-legend">
             <span className="lg-safe">Güvenli</span>
             <span className="lg-overhang">Destek</span>
+          </div>
+        </aside>
+      )}
+
+      {supportPanelOpen && model && (
+        <aside className={`support-panel${treePanelOpen ? ' with-tree' : ''}`}>
+          <div className="support-panel-header">
+            <div>
+              <strong>Destek Çubukları</strong>
+              <p>{supportCount > 0 ? `${supportCount} çubuk` : 'Ayarları düzenleyip oluşturun'}</p>
+            </div>
+            <button
+              type="button"
+              className="tb-btn"
+              onClick={() => setSupportPanelOpen(false)}
+              title="Paneli kapat"
+            >
+              Kapat
+            </button>
+          </div>
+
+          <label className="support-field">
+            <span>Açı eşiği ({supportAngle}°)</span>
+            <input
+              type="range"
+              min={30}
+              max={60}
+              step={1}
+              value={supportAngle}
+              onChange={(e) => setSupportAngle(Number(e.target.value))}
+            />
+          </label>
+
+          <label className="support-field">
+            <span>Çubuk yoğunluğu ({Math.round(supportDensity * 100)}%)</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={supportDensity}
+              onChange={(e) => setSupportDensity(Number(e.target.value))}
+            />
+          </label>
+
+          <label className="support-field">
+            <span>Çubuk çapı ({supportRadius.toFixed(1)} mm)</span>
+            <input
+              type="range"
+              min={1}
+              max={3}
+              step={0.1}
+              value={supportRadius}
+              onChange={(e) => setSupportRadius(Number(e.target.value))}
+            />
+          </label>
+
+          <div className="support-actions">
+            <ToolbarButton label="Oluştur" onClick={createSupports} />
+            <ToolbarButton
+              label="Destekleri Temizle"
+              onClick={clearSupports}
+              disabled={supportCount === 0}
+            />
           </div>
         </aside>
       )}
