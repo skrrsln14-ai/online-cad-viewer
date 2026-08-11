@@ -237,11 +237,13 @@
   opacity: 0.4;
 }
 
-.clip-axis-value {
-  font-size: 11px;
-  color: rgba(220, 220, 220, 0.55);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
+.clip-cap-color {
+  width: fit-content;
+}
+
+.clip-cap-color.is-disabled {
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 .clip-panel.with-tree {

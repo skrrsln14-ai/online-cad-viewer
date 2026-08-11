@@ -10,21 +10,30 @@ import {
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Html, Line, OrbitControls } from '@react-three/drei'
 import {
+  AlwaysStencilFunc,
+  BackSide,
   Box3,
   BufferAttribute,
   BufferGeometry,
+  DecrementWrapStencilOp,
   EdgesGeometry,
+  FrontSide,
   Group,
+  IncrementWrapStencilOp,
   LineBasicMaterial,
   LineSegments,
   Material,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
+  NotEqualStencilFunc,
   Object3D,
   Plane,
+  PlaneGeometry,
   PlaneHelper,
   Raycaster,
   RepeatWrapping,
+  ReplaceStencilOp,
   Sphere,
   SRGBColorSpace,
   Texture,
@@ -187,11 +196,94 @@ function createMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({ ...BASE_MATERIAL })
 }
 
+function collectRenderableMeshes(root: Object3D): Mesh[] {
+  const meshes: Mesh[] = []
+  root.traverse((child) => {
+    if (!(child as Mesh).isMesh) return
+    if (child.name === 'selection-highlight') return
+    if (child.name.startsWith('clip-stencil')) return
+    if (child.name.startsWith('clip-cap')) return
+    meshes.push(child as Mesh)
+  })
+  return meshes
+}
+
+function disposeObject3DTree(root: Object3D) {
+  root.traverse((child) => {
+    const mesh = child as Mesh
+    if (mesh.isMesh) {
+      // Shared geometries from model meshes must NOT be disposed here
+      if (mesh.name.startsWith('clip-cap')) {
+        mesh.geometry?.dispose()
+      }
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+      materials.forEach((mat) => mat?.dispose())
+    }
+  })
+}
+
+function createPlaneStencilGroup(
+  geometry: BufferGeometry,
+  plane: Plane,
+  renderOrder: number,
+): Group {
+  const group = new Group()
+  group.name = 'clip-stencil'
+
+  const baseMat = new MeshBasicMaterial()
+  baseMat.depthWrite = false
+  baseMat.depthTest = false
+  baseMat.colorWrite = false
+  baseMat.stencilWrite = true
+  baseMat.stencilFunc = AlwaysStencilFunc
+
+  const matBack = baseMat.clone()
+  matBack.side = BackSide
+  matBack.clippingPlanes = [plane]
+  matBack.stencilFail = IncrementWrapStencilOp
+  matBack.stencilZFail = IncrementWrapStencilOp
+  matBack.stencilZPass = IncrementWrapStencilOp
+
+  const matFront = baseMat.clone()
+  matFront.side = FrontSide
+  matFront.clippingPlanes = [plane]
+  matFront.stencilFail = DecrementWrapStencilOp
+  matFront.stencilZFail = DecrementWrapStencilOp
+  matFront.stencilZPass = DecrementWrapStencilOp
+
+  const backMesh = new Mesh(geometry, matBack)
+  backMesh.name = 'clip-stencil-back'
+  backMesh.renderOrder = renderOrder
+  backMesh.raycast = () => undefined
+  group.add(backMesh)
+
+  const frontMesh = new Mesh(geometry, matFront)
+  frontMesh.name = 'clip-stencil-front'
+  frontMesh.renderOrder = renderOrder
+  frontMesh.raycast = () => undefined
+  group.add(frontMesh)
+
+  return group
+}
+
+function clearClipStencilChildren(root: Object3D) {
+  const toRemove: Object3D[] = []
+  root.traverse((child) => {
+    if (child.name === 'clip-stencil') toRemove.push(child)
+  })
+  for (const node of toRemove) {
+    node.parent?.remove(node)
+    disposeObject3DTree(node)
+  }
+}
+
 function applyClippingToObject(root: Object3D | null, planes: Plane[]) {
   if (!root) return
   const list = planes.length > 0 ? planes : []
 
   root.traverse((child) => {
+    if (child.name.startsWith('clip-stencil') || child.name.startsWith('clip-cap')) return
+
     const mesh = child as Mesh
     if (mesh.isMesh) {
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
@@ -201,6 +293,7 @@ function applyClippingToObject(root: Object3D | null, planes: Plane[]) {
         mat.clipShadows = list.length > 0
         mat.needsUpdate = true
       })
+      mesh.renderOrder = list.length > 0 ? 6 : 0
     }
 
     const lines = child as LineSegments
@@ -252,6 +345,9 @@ function ClippingController({
   clipZ,
   draggingAxis,
   showHelpersAlways,
+  solidCapEnabled,
+  capColor,
+  capsRevision,
 }: {
   model: LoadedModel | null
   clipMasterEnabled: boolean
@@ -260,6 +356,9 @@ function ClippingController({
   clipZ: ClipAxisState
   draggingAxis: Axis | null
   showHelpersAlways: boolean
+  solidCapEnabled: boolean
+  capColor: string
+  capsRevision: number
 }) {
   const { gl } = useThree()
   const planes = useMemo(
@@ -280,23 +379,26 @@ function ClippingController({
     }
   }, [planes])
 
+  const capsGroupRef = useRef<Group>(null)
+  const capMeshesRef = useRef<Partial<Record<Axis, Mesh>>>({})
+
   useEffect(() => {
     gl.localClippingEnabled = true
   }, [gl])
 
+  // Keep plane equations + model clippingPlanes in sync (cheap; runs on slider move)
   useEffect(() => {
     updateClipPlane(planes.x, 'x', clipX.value, clipX.inverted)
     updateClipPlane(planes.y, 'y', clipY.value, clipY.inverted)
     updateClipPlane(planes.z, 'z', clipZ.value, clipZ.inverted)
 
-    const active: Plane[] = []
+    const activePlanes: Plane[] = []
     if (clipMasterEnabled) {
-      if (clipX.enabled) active.push(planes.x)
-      if (clipY.enabled) active.push(planes.y)
-      if (clipZ.enabled) active.push(planes.z)
+      if (clipX.enabled) activePlanes.push(planes.x)
+      if (clipY.enabled) activePlanes.push(planes.y)
+      if (clipZ.enabled) activePlanes.push(planes.z)
     }
-
-    applyClippingToObject(model?.root ?? null, active)
+    applyClippingToObject(model?.root ?? null, activePlanes)
 
     const diag = model
       ? Math.max(model.stats.size.x, model.stats.size.y, model.stats.size.z, 10) * 1.4
@@ -308,6 +410,142 @@ function ClippingController({
     helpers.y.updateMatrixWorld(true)
     helpers.z.updateMatrixWorld(true)
   }, [clipMasterEnabled, clipX, clipY, clipZ, model, planes, helpers])
+
+  // Rebuild stencil groups + cap meshes only when structure/color changes
+  useEffect(() => {
+    updateClipPlane(planes.x, 'x', clipX.value, clipX.inverted)
+    updateClipPlane(planes.y, 'y', clipY.value, clipY.inverted)
+    updateClipPlane(planes.z, 'z', clipZ.value, clipZ.inverted)
+
+    const activePlanes: Plane[] = []
+    const activeAxes: Axis[] = []
+    if (clipMasterEnabled) {
+      if (clipX.enabled) {
+        activePlanes.push(planes.x)
+        activeAxes.push('x')
+      }
+      if (clipY.enabled) {
+        activePlanes.push(planes.y)
+        activeAxes.push('y')
+      }
+      if (clipZ.enabled) {
+        activePlanes.push(planes.z)
+        activeAxes.push('z')
+      }
+    }
+
+    if (model?.root) clearClipStencilChildren(model.root)
+
+    const capsRoot = capsGroupRef.current
+    if (capsRoot) {
+      while (capsRoot.children.length) {
+        const child = capsRoot.children[0]
+        capsRoot.remove(child)
+        disposeObject3DTree(child)
+      }
+    }
+    capMeshesRef.current = {}
+
+    if (
+      !model?.root ||
+      !clipMasterEnabled ||
+      !solidCapEnabled ||
+      activeAxes.length === 0 ||
+      !capsRoot
+    ) {
+      return
+    }
+
+    const meshes = collectRenderableMeshes(model.root).filter((m) => m.visible)
+    const planeByAxis: Record<Axis, Plane> = {
+      x: planes.x,
+      y: planes.y,
+      z: planes.z,
+    }
+    const diag = Math.max(model.stats.size.x, model.stats.size.y, model.stats.size.z, 10) * 1.4
+
+    activeAxes.forEach((axis, index) => {
+      const plane = planeByAxis[axis]
+      const renderOrder = index + 1
+
+      for (const mesh of meshes) {
+        mesh.add(createPlaneStencilGroup(mesh.geometry, plane, renderOrder))
+      }
+
+      const otherPlanes = activePlanes.filter((p) => p !== plane)
+      const planeMat = new MeshStandardMaterial({
+        color: capColor,
+        metalness: 0.05,
+        roughness: 0.85,
+        clippingPlanes: otherPlanes,
+        clipShadows: true,
+        shadowSide: BackSide,
+        side: FrontSide,
+        stencilWrite: true,
+        stencilRef: 0,
+        stencilFunc: NotEqualStencilFunc,
+        stencilFail: ReplaceStencilOp,
+        stencilZFail: ReplaceStencilOp,
+        stencilZPass: ReplaceStencilOp,
+      })
+
+      const capSize = Math.max(diag * 2.2, 20)
+      const capMesh = new Mesh(new PlaneGeometry(capSize, capSize), planeMat)
+      capMesh.name = `clip-cap-${axis}`
+      capMesh.renderOrder = renderOrder + 0.1
+      capMesh.raycast = () => undefined
+      capMesh.onAfterRender = (renderer) => {
+        renderer.clearStencil()
+      }
+      capsRoot.add(capMesh)
+      capMeshesRef.current[axis] = capMesh
+    })
+
+    return () => {
+      if (model?.root) clearClipStencilChildren(model.root)
+    }
+  }, [
+    clipMasterEnabled,
+    clipX.enabled,
+    clipX.inverted,
+    clipY.enabled,
+    clipY.inverted,
+    clipZ.enabled,
+    clipZ.inverted,
+    model,
+    planes,
+    solidCapEnabled,
+    capsRevision,
+    // capColor updates via dedicated effect — avoid full stencil rebuild
+  ])
+
+  useEffect(() => {
+    Object.values(capMeshesRef.current).forEach((cap) => {
+      if (!cap) return
+      const mat = cap.material as MeshStandardMaterial
+      mat.color.set(capColor)
+      mat.needsUpdate = true
+    })
+  }, [capColor])
+
+  useFrame(() => {
+    const planeByAxis: Record<Axis, Plane> = {
+      x: planes.x,
+      y: planes.y,
+      z: planes.z,
+    }
+    ;(['x', 'y', 'z'] as Axis[]).forEach((axis) => {
+      const cap = capMeshesRef.current[axis]
+      const plane = planeByAxis[axis]
+      if (!cap) return
+      plane.coplanarPoint(cap.position)
+      cap.lookAt(
+        cap.position.x - plane.normal.x,
+        cap.position.y - plane.normal.y,
+        cap.position.z - plane.normal.z,
+      )
+    })
+  })
 
   const showX =
     clipMasterEnabled &&
@@ -324,6 +562,7 @@ function ClippingController({
 
   return (
     <>
+      <group ref={capsGroupRef} />
       {showX && <primitive object={helpers.x} />}
       {showY && <primitive object={helpers.y} />}
       {showZ && <primitive object={helpers.z} />}
@@ -858,7 +1097,11 @@ function StudioLights() {
 function collectModelMeshes(root: Object3D): Mesh[] {
   const meshes: Mesh[] = []
   root.traverse((child) => {
-    if ((child as Mesh).isMesh) meshes.push(child as Mesh)
+    if (!(child as Mesh).isMesh) return
+    if (child.name === 'selection-highlight') return
+    if (child.name.startsWith('clip-stencil')) return
+    if (child.name.startsWith('clip-cap')) return
+    meshes.push(child as Mesh)
   })
   return meshes
 }
@@ -1046,6 +1289,9 @@ function Scene({
   onPartPick,
   focusObject,
   focusRequestId,
+  solidCapEnabled,
+  capColor,
+  capsRevision,
 }: {
   model: LoadedModel | null
   showHelpers: boolean
@@ -1066,6 +1312,9 @@ function Scene({
   onPartPick: (meshId: string) => void
   focusObject: Object3D | null
   focusRequestId: number
+  solidCapEnabled: boolean
+  capColor: string
+  capsRevision: number
 }) {
   const gridSize = useMemo(() => {
     if (!model) return 40
@@ -1107,6 +1356,9 @@ function Scene({
         clipZ={clipZ}
         draggingAxis={clipDraggingAxis}
         showHelpersAlways={showClipHelpers}
+        solidCapEnabled={solidCapEnabled}
+        capColor={capColor}
+        capsRevision={capsRevision}
       />
 
       <MeasureClickHandler
@@ -1207,6 +1459,9 @@ export default function CADViewer() {
   const [clipZ, setClipZ] = useState<ClipAxisState>(DEFAULT_CLIP_AXIS)
   const [clipDraggingAxis, setClipDraggingAxis] = useState<Axis | null>(null)
   const [showClipHelpers, setShowClipHelpers] = useState(false)
+  const [solidCapEnabled, setSolidCapEnabled] = useState(true)
+  const [capColor, setCapColor] = useState('#8b0000')
+  const [capsRevision, setCapsRevision] = useState(0)
   const [treePanelOpen, setTreePanelOpen] = useState(false)
   const [assemblyParts, setAssemblyParts] = useState<AssemblyPart[]>([])
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null)
@@ -1515,6 +1770,7 @@ export default function CADViewer() {
       setIsolatedPartId(null)
     }
     syncAssemblyVisibility(root)
+    setCapsRevision((n) => n + 1)
   }, [isolatedPartId, syncAssemblyVisibility])
 
   const isolatePart = useCallback((partId: string) => {
@@ -1524,6 +1780,7 @@ export default function CADViewer() {
     setIsolatedPartId(partId)
     setSelectedPartId(partId)
     syncAssemblyVisibility(root)
+    setCapsRevision((n) => n + 1)
     const mesh = findMeshById(root, partId)
     if (mesh) {
       setFocusObject(mesh)
@@ -1538,6 +1795,7 @@ export default function CADViewer() {
     showAllMeshes(root)
     setIsolatedPartId(null)
     syncAssemblyVisibility(root)
+    setCapsRevision((n) => n + 1)
     setStatus('Tüm parçalar gösteriliyor')
   }, [syncAssemblyVisibility])
 
@@ -1608,7 +1866,7 @@ export default function CADViewer() {
       <Canvas
         style={{ width: '100%', height: '100%' }}
         camera={{ position: [4, 4, 4], fov: 50 }}
-        gl={{ antialias: true, localClippingEnabled: true }}
+        gl={{ antialias: true, localClippingEnabled: true, stencil: true }}
         onCreated={({ gl }) => {
           gl.localClippingEnabled = true
         }}
@@ -1634,6 +1892,9 @@ export default function CADViewer() {
           onPartPick={onPartPick}
           focusObject={focusObject}
           focusRequestId={focusRequestId}
+          solidCapEnabled={solidCapEnabled}
+          capColor={capColor}
+          capsRevision={capsRevision}
         />
       </Canvas>
 
@@ -1945,6 +2206,27 @@ export default function CADViewer() {
               onChange={(e) => setShowClipHelpers(e.target.checked)}
             />
             <span>Yardımcı düzlemleri göster</span>
+          </label>
+
+          <label className="clip-row clip-master">
+            <input
+              type="checkbox"
+              checked={solidCapEnabled}
+              onChange={(e) => setSolidCapEnabled(e.target.checked)}
+              disabled={!clipMasterEnabled}
+            />
+            <span>Kesit Yüzeyini Doldur (Solid Cap)</span>
+          </label>
+
+          <label className={`color-picker clip-cap-color${!solidCapEnabled || !clipMasterEnabled ? ' is-disabled' : ''}`}>
+            <input
+              type="color"
+              value={capColor}
+              disabled={!solidCapEnabled || !clipMasterEnabled}
+              onChange={(e) => setCapColor(e.target.value)}
+              aria-label="Kesit kapak rengi"
+            />
+            <span>Kapak rengi</span>
           </label>
 
           {([
