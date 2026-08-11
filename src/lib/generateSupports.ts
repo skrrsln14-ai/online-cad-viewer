@@ -21,6 +21,8 @@ export type SupportGeneratorOptions = {
 
 const SUPPORT_GROUP_NAME = 'print-supports'
 const SUPPORT_PILLAR_NAME = 'support-pillar'
+/** Only place supports on overhangs above this height (mm / model units). */
+const MIN_SUPPORT_HEIGHT_Y = 2
 
 const SUPPORT_MATERIAL = () =>
   new MeshStandardMaterial({
@@ -119,8 +121,9 @@ export function findOverhangSupportPoints(
         .add(c)
         .multiplyScalar(1 / 3)
 
-      // Skip near-ground faces (already on build plate)
-      if (centroid.y < Math.max(0.15, Math.abs(worldNormal.y) * 0.5)) continue
+      // Skip ground / near-ground faces — supports only for y > 2mm
+      if (centroid.y <= MIN_SUPPORT_HEIGHT_Y) continue
+      if (Math.min(a.y, b.y, c.y) <= 0) continue
 
       candidates.push({ point: centroid.clone(), area })
     }
@@ -206,6 +209,8 @@ export function generateSupportPillars(
 
   let count = 0
   for (const point of points) {
+    if (point.y <= MIN_SUPPORT_HEIGHT_Y) continue
+
     origin.copy(point)
     origin.y -= Math.max(radius * 0.25, 0.02)
     raycaster.set(origin, down)
