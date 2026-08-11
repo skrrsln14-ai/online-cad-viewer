@@ -55,7 +55,7 @@ import {
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
-import { loadOcctContent } from '../lib/loadOcctModel'
+import { loadOcctContent, type OcctLoadProgress } from '../lib/loadOcctModel'
 import ViewCube, { CameraOrientationPublisher } from './ViewCube'
 import './CADViewer.css'
 
@@ -758,7 +758,10 @@ async function createGltfContent(
   return { scene: gltf.scene, animations: gltf.animations ?? [] }
 }
 
-async function loadModelFromFile(file: File): Promise<LoadedModel> {
+async function loadModelFromFile(
+  file: File,
+  onOcctProgress?: (info: OcctLoadProgress) => void,
+): Promise<LoadedModel> {
   const ext = getExtension(file.name)
   let content: Object3D
   let animations: AnimationClip[] = []
@@ -774,7 +777,7 @@ async function loadModelFromFile(file: File): Promise<LoadedModel> {
     animations = gltf.animations
     cadZUp = false
   } else if ((OCCT_EXTENSIONS as readonly string[]).includes(ext)) {
-    content = await loadOcctContent(file)
+    content = await loadOcctContent(file, onOcctProgress)
   } else {
     throw new Error(`Desteklenmeyen dosya türü: ${ext || 'bilinmiyor'}`)
   }
@@ -1979,6 +1982,9 @@ export default function CADViewer() {
   const [renderTransparent, setRenderTransparent] = useState(false)
   const [printAnalysisActive, setPrintAnalysisActive] = useState(false)
   const [printLayerHeight, setPrintLayerHeight] = useState(0)
+  const [cadLoading, setCadLoading] = useState(false)
+  const [cadLoadProgress, setCadLoadProgress] = useState(0)
+  const [cadLoadStage, setCadLoadStage] = useState('')
   const [animPlaying, setAnimPlaying] = useState(false)
   const [animLoop, setAnimLoop] = useState(true)
   const [animSpeed, setAnimSpeed] = useState(1)
@@ -2121,14 +2127,26 @@ export default function CADViewer() {
   const handleModelFile = useCallback(
     async (file: File) => {
       setError(null)
-      setStatus(
-        /\.(step|stp|iges|igs)$/i.test(file.name)
-          ? `OpenCascade ile parse ediliyor: ${file.name}`
-          : `Yükleniyor: ${file.name}`,
-      )
+      const isCad = /\.(step|stp|iges|igs)$/i.test(file.name)
+      setStatus(isCad ? `OpenCascade ile parse ediliyor: ${file.name}` : `Yükleniyor: ${file.name}`)
+
+      if (isCad) {
+        setCadLoading(true)
+        setCadLoadProgress(0)
+        setCadLoadStage('Başlatılıyor')
+      }
 
       try {
-        const loaded = await loadModelFromFile(file)
+        const loaded = await loadModelFromFile(
+          file,
+          isCad
+            ? (info) => {
+                setCadLoadProgress(info.progress)
+                setCadLoadStage(info.stage)
+                setStatus(`${file.name} · ${info.stage} (${Math.round(info.progress)}%)`)
+              }
+            : undefined,
+        )
         applyModelColor(loaded.root, modelColorRef.current)
         applyViewMode(loaded.root, viewMode)
         revokeModelTextureUrl()
@@ -2170,6 +2188,10 @@ export default function CADViewer() {
         const message = err instanceof Error ? err.message : 'Dosya yüklenemedi.'
         setError(message)
         setStatus(null)
+      } finally {
+        setCadLoading(false)
+        setCadLoadProgress(0)
+        setCadLoadStage('')
       }
     },
     [revokeModelTextureUrl, viewMode],
@@ -3073,6 +3095,23 @@ export default function CADViewer() {
           )}
           <p className="model-info-note">Boyutlar birim olarak (genelde mm)</p>
         </aside>
+      )}
+
+      {cadLoading && (
+        <div className="cad-loading-overlay" role="status" aria-live="polite">
+          <div className="cad-loading-card">
+            <div className="cad-loading-spinner" aria-hidden />
+            <strong>CAD dosyası işleniyor</strong>
+            <p>{cadLoadStage || 'Hazırlanıyor…'}</p>
+            <div className="cad-progress-track">
+              <div
+                className="cad-progress-fill"
+                style={{ width: `${Math.min(100, Math.max(0, cadLoadProgress))}%` }}
+              />
+            </div>
+            <span className="cad-progress-pct">{Math.round(cadLoadProgress)}%</span>
+          </div>
+        </div>
       )}
 
       {isDragging && (

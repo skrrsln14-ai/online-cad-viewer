@@ -10,7 +10,13 @@ import {
   Object3D,
   Vector3,
 } from 'three'
-import wasmUrl from 'occt-import-js/dist/occt-import-js.wasm?url'
+import { DEFAULT_OCCT_TESSELLATION, type OcctTessellationParams } from './occtTessellation'
+import type {
+  OcctWorkerError,
+  OcctWorkerProgress,
+  OcctWorkerRequest,
+  OcctWorkerResult,
+} from './occt.worker'
 
 type OcctVec3 = [number, number, number]
 
@@ -25,14 +31,14 @@ type OcctMeshData = {
   index: { array: number[] | Uint32Array }
 }
 
-type OcctImportResult = {
+export type OcctImportResult = {
   success?: boolean
   meshes?: OcctMeshData[]
 }
 
-export type OcctModule = {
-  ReadStepFile: (buffer: Uint8Array, params: unknown) => OcctImportResult
-  ReadIgesFile: (buffer: Uint8Array, params: unknown) => OcctImportResult
+export type OcctLoadProgress = {
+  progress: number
+  stage: string
 }
 
 /** Light aluminum / studio CAD default (edges added in CADViewer.wrapLoadedObject). */
@@ -42,19 +48,16 @@ const BASE = {
   roughness: 0.5,
 } as const
 
-let occtReady: Promise<OcctModule> | null = null
+let worker: Worker | null = null
+let nextRequestId = 1
 
-/** Initialize OpenCascade WASM (singleton). */
-export async function initOcct(): Promise<OcctModule> {
-  if (!occtReady) {
-    occtReady = (async () => {
-      const { default: occtimportjs } = await import('occt-import-js')
-      return occtimportjs({
-        locateFile: (path: string) => (path.endsWith('.wasm') ? wasmUrl : path),
-      }) as Promise<OcctModule>
-    })()
+function getWorker(): Worker {
+  if (!worker) {
+    worker = new Worker(new URL('./occt.worker.ts', import.meta.url), {
+      type: 'module',
+    })
   }
-  return occtReady
+  return worker
 }
 
 function makeMaterial(color?: OcctVec3 | null): MeshStandardMaterial {
@@ -126,7 +129,6 @@ function buildGeometryFromOcct(meshData: OcctMeshData): {
   return { geometry, materials }
 }
 
-/** Center all mesh geometries around the assembly origin (like geometry.center()). */
 function centerAssembliesAtOrigin(root: Object3D) {
   root.updateMatrixWorld(true)
   const box = new Box3().setFromObject(root)
@@ -159,26 +161,13 @@ export function isOcctCadFile(filename: string): boolean {
   return ext === '.step' || ext === '.stp' || ext === '.iges' || ext === '.igs'
 }
 
-/**
- * Parse STEP/IGES via OpenCascade WASM and return a Three.js object.
- * CAD edge outlines are attached later in CADViewer.wrapLoadedObject.
- */
-export async function loadOcctContent(file: File): Promise<Object3D> {
-  const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
-  const fileBuffer = new Uint8Array(await file.arrayBuffer())
-  const occt = await initOcct()
-
-  const result =
-    ext === '.iges' || ext === '.igs'
-      ? occt.ReadIgesFile(fileBuffer, null)
-      : occt.ReadStepFile(fileBuffer, null)
-
+function buildObjectFromResult(result: OcctImportResult, name: string): Object3D {
   if (!result?.meshes?.length) {
     throw new Error('CAD dosyası parse edilemedi veya boş mesh döndü.')
   }
 
   const group = new Group()
-  group.name = file.name
+  group.name = name
 
   for (const meshData of result.meshes) {
     group.add(buildPartFromOcct(meshData))
@@ -187,3 +176,111 @@ export async function loadOcctContent(file: File): Promise<Object3D> {
   centerAssembliesAtOrigin(group)
   return group
 }
+
+/**
+ * Parse STEP/IGES on a Web Worker (WASM + tessellation off the UI thread).
+ */
+export function parseOcctInWorker(
+  buffer: ArrayBuffer,
+  kind: 'step' | 'iges',
+  onProgress?: (info: OcctLoadProgress) => void,
+  params: OcctTessellationParams = DEFAULT_OCCT_TESSELLATION,
+): Promise<OcctImportResult> {
+  const w = getWorker()
+  const id = nextRequestId++
+
+  return new Promise((resolve, reject) => {
+    let softProgress = 35
+    let softTimer: ReturnType<typeof setInterval> | null = null
+
+    const stopSoftProgress = () => {
+      if (softTimer) {
+        clearInterval(softTimer)
+        softTimer = null
+      }
+    }
+
+    const startSoftProgress = () => {
+      stopSoftProgress()
+      softTimer = setInterval(() => {
+        // Creep toward ~88% while OCCT blocks inside the worker
+        softProgress = Math.min(88, softProgress + Math.max(0.35, (88 - softProgress) * 0.04))
+        onProgress?.({
+          progress: softProgress,
+          stage: kind === 'iges' ? 'IGES tessellation…' : 'STEP tessellation…',
+        })
+      }, 250)
+    }
+
+    const handleMessage = (
+      event: MessageEvent<OcctWorkerProgress | OcctWorkerResult | OcctWorkerError>,
+    ) => {
+      const data = event.data
+      if (data.id !== id) return
+
+      if (data.type === 'progress') {
+        if (data.progress >= 35 && data.progress < 90) {
+          softProgress = Math.max(softProgress, data.progress)
+          startSoftProgress()
+        } else {
+          stopSoftProgress()
+          onProgress?.({ progress: data.progress, stage: data.stage })
+        }
+        return
+      }
+
+      stopSoftProgress()
+      w.removeEventListener('message', handleMessage)
+      w.removeEventListener('error', handleError)
+
+      if (data.type === 'error') {
+        reject(new Error(data.message))
+        return
+      }
+
+      resolve(data.result as OcctImportResult)
+    }
+
+    const handleError = (err: ErrorEvent) => {
+      stopSoftProgress()
+      w.removeEventListener('message', handleMessage)
+      w.removeEventListener('error', handleError)
+      reject(err.error instanceof Error ? err.error : new Error(err.message || 'Worker hatası'))
+    }
+
+    w.addEventListener('message', handleMessage)
+    w.addEventListener('error', handleError)
+
+    const request: OcctWorkerRequest = { id, kind, buffer, params }
+    // Transfer ownership of the ArrayBuffer to the worker (zero-copy)
+    w.postMessage(request, [buffer])
+  })
+}
+
+/**
+ * Parse STEP/IGES via OpenCascade WASM (worker) and build a Three.js object.
+ * CAD edge outlines are attached later in CADViewer.wrapLoadedObject.
+ */
+export async function loadOcctContent(
+  file: File,
+  onProgress?: (info: OcctLoadProgress) => void,
+  params: OcctTessellationParams = DEFAULT_OCCT_TESSELLATION,
+): Promise<Object3D> {
+  const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
+  const kind: 'step' | 'iges' = ext === '.iges' || ext === '.igs' ? 'iges' : 'step'
+
+  onProgress?.({ progress: 3, stage: 'Dosya okunuyor' })
+  const buffer = await file.arrayBuffer()
+
+  onProgress?.({ progress: 6, stage: 'Arka plan işçisine aktarılıyor' })
+  const result = await parseOcctInWorker(buffer, kind, onProgress, params)
+
+  onProgress?.({ progress: 94, stage: 'Three.js mesh oluşturuluyor' })
+  const object = buildObjectFromResult(result, file.name)
+
+  onProgress?.({ progress: 100, stage: 'Tamamlandı' })
+  return object
+}
+
+export { DEFAULT_OCCT_TESSELLATION }
+export type { OcctTessellationParams }
