@@ -8,7 +8,7 @@ import {
   type DragEvent,
 } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { OrbitControls } from '@react-three/drei'
+import { Html, Line, OrbitControls } from '@react-three/drei'
 import {
   Box3,
   BufferAttribute,
@@ -21,11 +21,13 @@ import {
   Mesh,
   MeshStandardMaterial,
   Object3D,
+  Raycaster,
   RepeatWrapping,
   Sphere,
   SRGBColorSpace,
   Texture,
   TextureLoader,
+  Vector2,
   Vector3,
   DirectionalLight,
 } from 'three'
@@ -60,13 +62,20 @@ type OrbitControlsLike = {
 }
 
 const BASE_MATERIAL = {
-  color: '#d0d7de',
+  color: '#c0c6cc',
   metalness: 0.2,
   roughness: 0.5,
 } as const
 
 const EDGE_THRESHOLD_DEG = 35
 const EDGE_COLOR = '#1a1a1a'
+const DEFAULT_MODEL_COLOR = '#c0c6cc'
+
+type Measurement = {
+  id: string
+  a: [number, number, number]
+  b: [number, number, number]
+}
 
 const MODEL_EXTENSIONS = ['.stl', '.obj', '.step', '.stp', '.iges', '.igs'] as const
 const TEXTURE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'] as const
@@ -348,7 +357,20 @@ function applyTextureToModel(root: Object3D, texture: Texture) {
   })
 }
 
-function clearTextureFromModel(root: Object3D) {
+function applyModelColor(root: Object3D, color: string) {
+  root.traverse((child) => {
+    if (!(child as Mesh).isMesh) return
+    const mesh = child as Mesh
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+    materials.forEach((mat) => {
+      if (!(mat instanceof MeshStandardMaterial)) return
+      mat.color.set(color)
+      mat.needsUpdate = true
+    })
+  })
+}
+
+function clearTextureFromModel(root: Object3D, restoreColor: string = BASE_MATERIAL.color) {
   const disposed = new Set<Texture>()
 
   root.traverse((child) => {
@@ -364,7 +386,7 @@ function clearTextureFromModel(root: Object3D) {
         }
         mat.map = null
       }
-      mat.color.set(BASE_MATERIAL.color)
+      mat.color.set(restoreColor)
       mat.metalness = BASE_MATERIAL.metalness
       mat.roughness = BASE_MATERIAL.roughness
       mat.needsUpdate = true
@@ -567,12 +589,100 @@ function KeyLightFollowCamera({ intensity = 2.5 }: { intensity?: number }) {
 function StudioLights() {
   return (
     <>
-      <ambientLight intensity={1.75} color="#ffffff" />
-      <hemisphereLight args={['#ffffff', '#444444', 1.0]} />
+      <ambientLight intensity={1.8} color="#ffffff" />
       <KeyLightFollowCamera intensity={2.5} />
-      {/* Fill — softens shadows from camera-right / back */}
-      <directionalLight position={[-100, 100, -100]} intensity={1.5} color="#ffffff" />
+      <directionalLight position={[-100, 100, -100]} intensity={2.5} color="#ffffff" />
     </>
+  )
+}
+
+function collectModelMeshes(root: Object3D): Mesh[] {
+  const meshes: Mesh[] = []
+  root.traverse((child) => {
+    if ((child as Mesh).isMesh) meshes.push(child as Mesh)
+  })
+  return meshes
+}
+
+function MeasureClickHandler({
+  active,
+  target,
+  onHit,
+}: {
+  active: boolean
+  target: Object3D | null
+  onHit: (point: Vector3) => void
+}) {
+  const { camera, gl } = useThree()
+  const raycaster = useMemo(() => new Raycaster(), [])
+  const pointer = useMemo(() => new Vector2(), [])
+  const onHitRef = useRef(onHit)
+  onHitRef.current = onHit
+
+  useEffect(() => {
+    if (!active || !target) return
+
+    const element = gl.domElement
+    const onClick = (event: MouseEvent) => {
+      const rect = element.getBoundingClientRect()
+      pointer.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      )
+      raycaster.setFromCamera(pointer, camera)
+      const hits = raycaster.intersectObjects(collectModelMeshes(target), false)
+      if (hits[0]) onHitRef.current(hits[0].point.clone())
+    }
+
+    element.addEventListener('click', onClick)
+    return () => element.removeEventListener('click', onClick)
+  }, [active, target, camera, gl, pointer, raycaster])
+
+  return null
+}
+
+function MeasurementMarkers({
+  measurements,
+  pending,
+  markerScale,
+}: {
+  measurements: Measurement[]
+  pending: [number, number, number] | null
+  markerScale: number
+}) {
+  return (
+    <group>
+      {pending && (
+        <mesh position={pending}>
+          <sphereGeometry args={[markerScale, 18, 18]} />
+          <meshBasicMaterial color="#ff2222" depthTest={false} />
+        </mesh>
+      )}
+
+      {measurements.map((item) => {
+        const a = new Vector3(...item.a)
+        const b = new Vector3(...item.b)
+        const mid = a.clone().add(b).multiplyScalar(0.5)
+        const distance = a.distanceTo(b)
+
+        return (
+          <group key={item.id}>
+            <mesh position={a}>
+              <sphereGeometry args={[markerScale, 18, 18]} />
+              <meshBasicMaterial color="#ff2222" depthTest={false} />
+            </mesh>
+            <mesh position={b}>
+              <sphereGeometry args={[markerScale, 18, 18]} />
+              <meshBasicMaterial color="#ff2222" depthTest={false} />
+            </mesh>
+            <Line points={[item.a, item.b]} color="#ff2222" lineWidth={2} />
+            <Html position={mid} center distanceFactor={12} style={{ pointerEvents: 'none' }}>
+              <div className="measure-label">{distance.toFixed(2)} mm</div>
+            </Html>
+          </group>
+        )
+      })}
+    </group>
   )
 }
 
@@ -582,17 +692,31 @@ function Scene({
   viewPreset,
   cameraRequestId,
   groundTexture,
+  measureMode,
+  measurements,
+  pendingPoint,
+  onMeasureHit,
 }: {
   model: LoadedModel | null
   showHelpers: boolean
   viewPreset: ViewPreset
   cameraRequestId: number
   groundTexture: Texture | null
+  measureMode: boolean
+  measurements: Measurement[]
+  pendingPoint: [number, number, number] | null
+  onMeasureHit: (point: Vector3) => void
 }) {
   const gridSize = useMemo(() => {
     if (!model) return 40
     const s = Math.max(model.stats.size.x, model.stats.size.z, 10)
     return Math.ceil(s * 2.5)
+  }, [model])
+
+  const markerScale = useMemo(() => {
+    if (!model) return 0.4
+    const diag = Math.hypot(model.stats.size.x, model.stats.size.y, model.stats.size.z)
+    return Math.max(diag * 0.008, 0.15)
   }, [model])
 
   return (
@@ -609,6 +733,17 @@ function Scene({
       )}
 
       {model && <primitive object={model.root} />}
+
+      <MeasureClickHandler
+        active={measureMode && !!model}
+        target={model?.root ?? null}
+        onHit={onMeasureHit}
+      />
+      <MeasurementMarkers
+        measurements={measurements}
+        pending={pendingPoint}
+        markerScale={markerScale}
+      />
 
       <CameraDirector
         target={model?.root ?? null}
@@ -678,11 +813,21 @@ export default function CADViewer() {
   const [showHelpers, setShowHelpers] = useState(true)
   const [viewPreset, setViewPreset] = useState<ViewPreset>('iso')
   const [cameraRequestId, setCameraRequestId] = useState(0)
+  const [modelColor, setModelColor] = useState(DEFAULT_MODEL_COLOR)
+  const [measureMode, setMeasureMode] = useState(false)
+  const [measurements, setMeasurements] = useState<Measurement[]>([])
+  const [pendingPoint, setPendingPoint] = useState<[number, number, number] | null>(null)
   const dragDepth = useRef(0)
+  const modelColorRef = useRef(modelColor)
+  const pendingPointRef = useRef<[number, number, number] | null>(null)
 
   useEffect(() => {
     modelRef.current = model
   }, [model])
+
+  useEffect(() => {
+    modelColorRef.current = modelColor
+  }, [modelColor])
 
   useEffect(() => {
     groundTextureRef.current = groundTexture
@@ -789,9 +934,13 @@ export default function CADViewer() {
 
       try {
         const loaded = await loadModelFromFile(file)
+        applyModelColor(loaded.root, modelColorRef.current)
         applyViewMode(loaded.root, viewMode)
         revokeModelTextureUrl()
         setModelTextureName(null)
+        setMeasurements([])
+        setPendingPoint(null)
+        pendingPointRef.current = null
         setModel((prev) => {
           if (prev) disposeObject(prev.root)
           return loaded
@@ -843,12 +992,63 @@ export default function CADViewer() {
 
     const current = modelRef.current
     if (!current) return
-    clearTextureFromModel(current.root)
+    clearTextureFromModel(current.root, modelColorRef.current)
     applyViewMode(current.root, viewMode)
     revokeModelTextureUrl()
     setModelTextureName(null)
     setStatus(current.name)
   }, [revokeGroundTextureUrl, revokeModelTextureUrl, textureTarget, viewMode])
+
+  const onModelColorChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const color = event.target.value
+    setModelColor(color)
+    if (model) applyModelColor(model.root, color)
+  }
+
+  const onMeasureHit = useCallback((point: Vector3) => {
+    const tuple: [number, number, number] = [point.x, point.y, point.z]
+    const first = pendingPointRef.current
+
+    if (!first) {
+      pendingPointRef.current = tuple
+      setPendingPoint(tuple)
+      setStatus('İkinci noktayı seçin')
+      return
+    }
+
+    pendingPointRef.current = null
+    setPendingPoint(null)
+    setMeasurements((list) => [
+      ...list,
+      {
+        id: `m-${Date.now()}-${list.length}`,
+        a: first,
+        b: tuple,
+      },
+    ])
+    setStatus('Ölçüm eklendi — yeni ölçüm için iki nokta daha seçin')
+  }, [])
+
+  const clearMeasurements = useCallback(() => {
+    pendingPointRef.current = null
+    setMeasurements([])
+    setPendingPoint(null)
+    setStatus('Ölçümler temizlendi')
+  }, [])
+
+  const toggleMeasureMode = useCallback(() => {
+    setMeasureMode((active) => {
+      const next = !active
+      pendingPointRef.current = null
+      setPendingPoint(null)
+      if (next) {
+        setStatus('Ölçüm modu: model üzerinde iki nokta seçin')
+      } else {
+        setStatus(null)
+      }
+      return next
+    })
+  }, [])
 
   const onViewModeChange = (mode: ViewMode) => {
     setViewMode(mode)
@@ -908,7 +1108,7 @@ export default function CADViewer() {
 
   return (
     <div
-      className="cad-viewer"
+      className={`cad-viewer${measureMode ? ' is-measuring' : ''}`}
       onDragEnter={onDragEnter}
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
@@ -926,6 +1126,10 @@ export default function CADViewer() {
           viewPreset={viewPreset}
           cameraRequestId={cameraRequestId}
           groundTexture={groundTexture}
+          measureMode={measureMode}
+          measurements={measurements}
+          pendingPoint={pendingPoint}
+          onMeasureHit={onMeasureHit}
         />
       </Canvas>
 
@@ -967,6 +1171,40 @@ export default function CADViewer() {
             accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
             className="file-input"
             onChange={onTextureInputChange}
+          />
+        </div>
+
+        <div className="tb-divider" />
+
+        <div className="tb-group">
+          <span className="tb-label">Renk</span>
+          <label className="color-picker" title="Model rengi">
+            <input
+              type="color"
+              value={modelColor}
+              onChange={onModelColorChange}
+              disabled={!model}
+              aria-label="Model rengi"
+            />
+            <span>{modelColor}</span>
+          </label>
+        </div>
+
+        <div className="tb-divider" />
+
+        <div className="tb-group">
+          <span className="tb-label">Ölçüm</span>
+          <ToolbarButton
+            label="Ölçüm Yap"
+            active={measureMode}
+            onClick={toggleMeasureMode}
+            disabled={!model}
+            title="İki nokta arası mesafe ölç"
+          />
+          <ToolbarButton
+            label="Ölçümleri Temizle"
+            onClick={clearMeasurements}
+            disabled={measurements.length === 0 && !pendingPoint}
           />
         </div>
 

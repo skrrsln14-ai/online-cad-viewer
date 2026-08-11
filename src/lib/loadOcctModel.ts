@@ -37,7 +37,7 @@ export type OcctModule = {
 
 /** Light aluminum / studio CAD default (edges added in CADViewer.wrapLoadedObject). */
 const BASE = {
-  color: '#d0d7de',
+  color: '#c0c6cc',
   metalness: 0.2,
   roughness: 0.5,
 } as const

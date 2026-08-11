@@ -87,6 +87,58 @@
   cursor: not-allowed;
 }
 
+.cad-viewer.is-measuring,
+.cad-viewer.is-measuring canvas {
+  cursor: crosshair;
+}
+
+.color-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 4px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11px;
+  color: #d8d8d8;
+  cursor: pointer;
+}
+
+.color-picker input[type='color'] {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.color-picker input[type='color']:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.color-picker span {
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.measure-label {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(18, 18, 20, 0.88);
+  border: 1px solid rgba(255, 60, 60, 0.55);
+  color: #ffd0d0;
+  font: 600 12px/1.2 'Segoe UI', system-ui, sans-serif;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  user-select: none;
+}
+
 .tb-status {
   margin-left: auto;
   font-size: 12px;
