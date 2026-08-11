@@ -388,11 +388,13 @@ function ClippingController({
 
   const helpers = useMemo(() => {
     const size = 40
-    return {
-      x: new PlaneHelper(planes.x, size, CLIP_HELPER_COLORS.x),
-      y: new PlaneHelper(planes.y, size, CLIP_HELPER_COLORS.y),
-      z: new PlaneHelper(planes.z, size, CLIP_HELPER_COLORS.z),
-    }
+    const x = new PlaneHelper(planes.x, size, CLIP_HELPER_COLORS.x)
+    const y = new PlaneHelper(planes.y, size, CLIP_HELPER_COLORS.y)
+    const z = new PlaneHelper(planes.z, size, CLIP_HELPER_COLORS.z)
+    x.name = 'clip-plane-helper'
+    y.name = 'clip-plane-helper'
+    z.name = 'clip-plane-helper'
+    return { x, y, z }
   }, [planes])
 
   const capsGroupRef = useRef<Group>(null)
@@ -1066,7 +1068,12 @@ function GroundPlane({
   texture: Texture | null
 }) {
   return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.002, 0]} receiveShadow>
+    <mesh
+      name="ground-plane"
+      rotation={[-Math.PI / 2, 0, 0]}
+      position={[0, -0.002, 0]}
+      receiveShadow
+    >
       <planeGeometry args={[size, size]} />
       <meshStandardMaterial
         key={texture?.uuid ?? 'ground-base'}
@@ -1153,6 +1160,22 @@ function StudioEnvironment({ preset }: { preset: PresetsType }) {
   )
 }
 
+const TRANSPARENT_HIDE_NAMES = new Set([
+  'ground-plane',
+  'scene-grid',
+  'scene-axes',
+  'measurement-overlays',
+  'selection-highlight',
+  'clip-plane-helper',
+])
+
+function shouldHideForTransparentCapture(obj: Object3D): boolean {
+  if (TRANSPARENT_HIDE_NAMES.has(obj.name)) return true
+  // PlaneHelper / GridHelper type fallbacks
+  const type = obj.type
+  return type === 'GridHelper' || type === 'AxesHelper' || type === 'PlaneHelper'
+}
+
 function RenderCaptureController({
   requestId,
   transparent,
@@ -1185,32 +1208,47 @@ function RenderCaptureController({
       })
 
     const run = async () => {
+      const visibilityRestore: { obj: Object3D; visible: boolean }[] = []
+      const prevPixelRatio = gl.getPixelRatio()
+      const prevClearAlpha = gl.getClearAlpha()
+      const prevColor = new Color()
+      gl.getClearColor(prevColor)
+      const prevBackground = scene.background
+      const prevAutoClear = gl.autoClear
+
       try {
+        // Wait for UI hide (is-capturing) to paint
         await waitFrames(2)
         if (cancelled) return
 
-        const prevPixelRatio = gl.getPixelRatio()
-        const prevClearAlpha = gl.getClearAlpha()
-        const prevColor = new Color()
-        gl.getClearColor(prevColor)
-        const prevBackground = scene.background
-
-        const scale = 2
-        gl.setPixelRatio(scale)
-        gl.setSize(size.width, size.height, false)
-
         if (transparent) {
+          scene.traverse((obj) => {
+            if (!shouldHideForTransparentCapture(obj)) return
+            visibilityRestore.push({ obj, visible: obj.visible })
+            obj.visible = false
+          })
           scene.background = null
           gl.setClearColor(0x000000, 0)
         }
 
+        const scale = 2
+        gl.setPixelRatio(scale)
+        gl.setSize(size.width, size.height, false)
+        gl.autoClear = true
+        gl.clear(true, true, true)
         gl.render(scene, camera)
+
         const dataUrl = gl.domElement.toDataURL('image/png')
 
-        gl.setPixelRatio(prevPixelRatio)
-        gl.setSize(size.width, size.height, false)
+        // Restore scene / renderer before download UI returns
+        for (const entry of visibilityRestore) {
+          entry.obj.visible = entry.visible
+        }
         scene.background = prevBackground
         gl.setClearColor(prevColor, prevClearAlpha)
+        gl.setPixelRatio(prevPixelRatio)
+        gl.setSize(size.width, size.height, false)
+        gl.autoClear = prevAutoClear
         gl.render(scene, camera)
 
         if (cancelled) return
@@ -1223,6 +1261,19 @@ function RenderCaptureController({
         link.remove()
         onCompleteRef.current()
       } catch (err) {
+        for (const entry of visibilityRestore) {
+          entry.obj.visible = entry.visible
+        }
+        scene.background = prevBackground
+        gl.setClearColor(prevColor, prevClearAlpha)
+        gl.setPixelRatio(prevPixelRatio)
+        gl.setSize(size.width, size.height, false)
+        gl.autoClear = prevAutoClear
+        try {
+          gl.render(scene, camera)
+        } catch {
+          /* ignore restore render errors */
+        }
         const message = err instanceof Error ? err.message : 'Render alınamadı.'
         onErrorRef.current(message)
       }
@@ -1377,7 +1428,7 @@ function MeasurementMarkers({
   markerScale: number
 }) {
   return (
-    <group>
+    <group name="measurement-overlays">
       {pending && (
         <mesh position={pending}>
           <sphereGeometry args={[markerScale, 18, 18]} />
@@ -1503,8 +1554,8 @@ function Scene({
 
       {showHelpers && (
         <>
-          <gridHelper args={[gridSize, Math.min(gridSize, 40), '#4a4a4a', '#2c2c2c']} />
-          <axesHelper args={[Math.max(gridSize * 0.15, 2)]} />
+          <gridHelper name="scene-grid" args={[gridSize, Math.min(gridSize, 40), '#4a4a4a', '#2c2c2c']} />
+          <axesHelper name="scene-axes" args={[Math.max(gridSize * 0.15, 2)]} />
         </>
       )}
 
