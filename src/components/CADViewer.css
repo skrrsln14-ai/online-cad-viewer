@@ -103,6 +103,59 @@
   cursor: not-allowed;
 }
 
+.tb-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.tb-select-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(240, 240, 240, 0.7);
+  white-space: nowrap;
+}
+
+.tb-select select {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: #f0f0f0;
+  font: 500 12px/1.2 'Segoe UI', system-ui, sans-serif;
+  padding: 4px 18px 4px 0;
+  cursor: pointer;
+  max-width: 160px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23c8c8c8' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0 center;
+}
+
+.tb-select select:focus {
+  outline: none;
+}
+
+.tb-select select option {
+  color: #111;
+  background: #f5f5f5;
+}
+
+.cad-viewer.is-capturing .cad-toolbar,
+.cad-viewer.is-capturing .viewcube-root,
+.cad-viewer.is-capturing .clip-panel,
+.cad-viewer.is-capturing .assembly-panel,
+.cad-viewer.is-capturing .model-info,
+.cad-viewer.is-capturing .empty-hint,
+.cad-viewer.is-capturing .drop-overlay,
+.cad-viewer.is-capturing .measure-label {
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 .cad-viewer.is-measuring,
 .cad-viewer.is-measuring canvas {
   cursor: crosshair;

@@ -9,13 +9,15 @@ import {
   type MutableRefObject,
 } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { Html, Line, OrbitControls } from '@react-three/drei'
+import { Environment, Html, Line, OrbitControls } from '@react-three/drei'
+import type { PresetsType } from '@react-three/drei/helpers/environment-assets'
 import {
   AlwaysStencilFunc,
   BackSide,
   Box3,
   BufferAttribute,
   BufferGeometry,
+  Color,
   DecrementWrapStencilOp,
   EdgesGeometry,
   FrontSide,
@@ -54,6 +56,17 @@ type ViewMode = 'solid' | 'wireframe' | 'translucent'
 type ViewPreset = 'iso' | 'top' | 'front' | 'right'
 type Axis = 'x' | 'y' | 'z'
 type TextureTarget = 'model' | 'ground'
+type StudioEnvId = 'studio' | 'warehouse' | 'park'
+
+const STUDIO_ENV_OPTIONS: {
+  id: StudioEnvId
+  label: string
+  preset: PresetsType
+}[] = [
+  { id: 'studio', label: 'Nötr Stüdyo', preset: 'studio' },
+  { id: 'warehouse', label: 'Endüstriyel Garaj', preset: 'warehouse' },
+  { id: 'park', label: 'Açık Hava / Gün Işığı', preset: 'park' },
+]
 
 const GROUND_TEXTURE_REPEAT = 10
 const GROUND_BASE_COLOR = '#2a2a2a'
@@ -1115,14 +1128,113 @@ function KeyLightFollowCamera({ intensity = 2.5 }: { intensity?: number }) {
   )
 }
 
-function StudioLights() {
+function StudioLights({ hdriActive }: { hdriActive: boolean }) {
   return (
     <>
-      <ambientLight intensity={1.8} color="#ffffff" />
-      <KeyLightFollowCamera intensity={2.5} />
-      <directionalLight position={[-100, 100, -100]} intensity={2.5} color="#ffffff" />
+      <ambientLight intensity={hdriActive ? 0.4 : 1.8} color="#ffffff" />
+      <KeyLightFollowCamera intensity={hdriActive ? 1.0 : 2.5} />
+      <directionalLight
+        position={[-100, 100, -100]}
+        intensity={hdriActive ? 0.75 : 2.5}
+        color="#ffffff"
+      />
     </>
   )
+}
+
+function StudioEnvironment({ preset }: { preset: PresetsType }) {
+  return (
+    <Environment
+      key={preset}
+      preset={preset}
+      environmentIntensity={1}
+      background={false}
+    />
+  )
+}
+
+function RenderCaptureController({
+  requestId,
+  transparent,
+  onComplete,
+  onError,
+}: {
+  requestId: number
+  transparent: boolean
+  onComplete: () => void
+  onError: (message: string) => void
+}) {
+  const { gl, scene, camera, size } = useThree()
+  const onCompleteRef = useRef(onComplete)
+  const onErrorRef = useRef(onError)
+  onCompleteRef.current = onComplete
+  onErrorRef.current = onError
+
+  useEffect(() => {
+    if (requestId === 0) return
+
+    let cancelled = false
+
+    const waitFrames = (n: number) =>
+      new Promise<void>((resolve) => {
+        const step = (left: number) => {
+          if (left <= 0) resolve()
+          else requestAnimationFrame(() => step(left - 1))
+        }
+        step(n)
+      })
+
+    const run = async () => {
+      try {
+        await waitFrames(2)
+        if (cancelled) return
+
+        const prevPixelRatio = gl.getPixelRatio()
+        const prevClearAlpha = gl.getClearAlpha()
+        const prevColor = new Color()
+        gl.getClearColor(prevColor)
+        const prevBackground = scene.background
+
+        const scale = 2
+        gl.setPixelRatio(scale)
+        gl.setSize(size.width, size.height, false)
+
+        if (transparent) {
+          scene.background = null
+          gl.setClearColor(0x000000, 0)
+        }
+
+        gl.render(scene, camera)
+        const dataUrl = gl.domElement.toDataURL('image/png')
+
+        gl.setPixelRatio(prevPixelRatio)
+        gl.setSize(size.width, size.height, false)
+        scene.background = prevBackground
+        gl.setClearColor(prevColor, prevClearAlpha)
+        gl.render(scene, camera)
+
+        if (cancelled) return
+
+        const link = document.createElement('a')
+        link.href = dataUrl
+        link.download = 'cad-model-render.png'
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        onCompleteRef.current()
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Render alınamadı.'
+        onErrorRef.current(message)
+      }
+    }
+
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [requestId, transparent, gl, scene, camera, size])
+
+  return null
 }
 
 function collectModelMeshes(root: Object3D): Mesh[] {
@@ -1326,6 +1438,11 @@ function Scene({
   orientationRef,
   viewDirRef,
   viewDirRequestId,
+  studioEnv,
+  renderRequestId,
+  renderTransparent,
+  onRenderComplete,
+  onRenderError,
 }: {
   model: LoadedModel | null
   showHelpers: boolean
@@ -1352,6 +1469,11 @@ function Scene({
   orientationRef: MutableRefObject<Quaternion>
   viewDirRef: MutableRefObject<Vector3>
   viewDirRequestId: number
+  studioEnv: StudioEnvId
+  renderRequestId: number
+  renderTransparent: boolean
+  onRenderComplete: () => void
+  onRenderError: (message: string) => void
 }) {
   const gridSize = useMemo(() => {
     if (!model) return 40
@@ -1370,9 +1492,12 @@ function Scene({
     return findMeshById(model.root, selectedPartId)
   }, [model, selectedPartId])
 
+  const envPreset = STUDIO_ENV_OPTIONS.find((o) => o.id === studioEnv)?.preset ?? 'studio'
+
   return (
     <>
-      <StudioLights />
+      <StudioLights hdriActive />
+      <StudioEnvironment preset={envPreset} />
 
       <GroundPlane size={gridSize} texture={groundTexture} />
 
@@ -1426,6 +1551,12 @@ function Scene({
       />
       <OrbitControls makeDefault />
       <CameraOrientationPublisher orientationRef={orientationRef} />
+      <RenderCaptureController
+        requestId={renderRequestId}
+        transparent={renderTransparent}
+        onComplete={onRenderComplete}
+        onError={onRenderError}
+      />
     </>
   )
 }
@@ -1509,6 +1640,10 @@ export default function CADViewer() {
   const [focusObject, setFocusObject] = useState<Object3D | null>(null)
   const [focusRequestId, setFocusRequestId] = useState(0)
   const [viewDirRequestId, setViewDirRequestId] = useState(0)
+  const [studioEnv, setStudioEnv] = useState<StudioEnvId>('studio')
+  const [renderRequestId, setRenderRequestId] = useState(0)
+  const [isCapturing, setIsCapturing] = useState(false)
+  const [renderTransparent, setRenderTransparent] = useState(false)
   const orientationRef = useRef(new Quaternion())
   const viewDirRef = useRef(new Vector3(1, 1, 1).normalize())
   const dragDepth = useRef(0)
@@ -1557,6 +1692,23 @@ export default function CADViewer() {
   const onViewCubeSelect = useCallback((direction: Vector3) => {
     viewDirRef.current.copy(direction).normalize()
     setViewDirRequestId((id) => id + 1)
+  }, [])
+
+  const startRenderCapture = useCallback((transparent: boolean) => {
+    setRenderTransparent(transparent)
+    setIsCapturing(true)
+    setStatus(transparent ? 'Şeffaf PNG hazırlanıyor…' : 'Render hazırlanıyor…')
+    setRenderRequestId((id) => id + 1)
+  }, [])
+
+  const onRenderComplete = useCallback(() => {
+    setIsCapturing(false)
+    setStatus('Render indirildi: cad-model-render.png')
+  }, [])
+
+  const onRenderError = useCallback((message: string) => {
+    setIsCapturing(false)
+    setError(message)
   }, [])
 
   const applyModelTexture = useCallback(
@@ -1905,7 +2057,7 @@ export default function CADViewer() {
 
   return (
     <div
-      className={`cad-viewer${measureMode ? ' is-measuring' : ''}`}
+      className={`cad-viewer${measureMode ? ' is-measuring' : ''}${isCapturing ? ' is-capturing' : ''}`}
       onDragEnter={onDragEnter}
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
@@ -1915,9 +2067,16 @@ export default function CADViewer() {
         className="main-viewport"
         style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
         camera={{ position: [4, 4, 4], fov: 50 }}
-        gl={{ antialias: true, localClippingEnabled: true, stencil: true }}
+        gl={{
+          antialias: true,
+          localClippingEnabled: true,
+          stencil: true,
+          preserveDrawingBuffer: true,
+          alpha: true,
+        }}
         onCreated={({ gl }) => {
           gl.localClippingEnabled = true
+          gl.setClearColor(0x1a1a1a, 1)
         }}
       >
         <color attach="background" args={['#1a1a1a']} />
@@ -1947,6 +2106,11 @@ export default function CADViewer() {
           orientationRef={orientationRef}
           viewDirRef={viewDirRef}
           viewDirRequestId={viewDirRequestId}
+          studioEnv={studioEnv}
+          renderRequestId={renderRequestId}
+          renderTransparent={renderTransparent}
+          onRenderComplete={onRenderComplete}
+          onRenderError={onRenderError}
         />
       </Canvas>
 
@@ -2156,6 +2320,32 @@ export default function CADViewer() {
             active={showHelpers}
             onClick={() => setShowHelpers((v) => !v)}
             title="Grid ve eksenleri aç/kapat"
+          />
+          <label className="tb-select" title="HDRI stüdyo ortamı">
+            <span className="tb-select-label">Stüdyo / Işık</span>
+            <select
+              value={studioEnv}
+              onChange={(e) => setStudioEnv(e.target.value as StudioEnvId)}
+              aria-label="Stüdyo / Işık"
+            >
+              {STUDIO_ENV_OPTIONS.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <ToolbarButton
+            label="Render Al"
+            onClick={() => startRenderCapture(false)}
+            disabled={isCapturing}
+            title="Mevcut stüdyo fonuyla PNG indir (2×)"
+          />
+          <ToolbarButton
+            label="Şeffaf PNG"
+            onClick={() => startRenderCapture(true)}
+            disabled={isCapturing}
+            title="Şeffaf arka planlı PNG indir (2×)"
           />
         </div>
 
