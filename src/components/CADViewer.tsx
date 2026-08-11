@@ -18,6 +18,7 @@ import {
   Mesh,
   MeshStandardMaterial,
   Object3D,
+  RepeatWrapping,
   Sphere,
   SRGBColorSpace,
   Texture,
@@ -31,6 +32,10 @@ import './CADViewer.css'
 type ViewMode = 'solid' | 'wireframe' | 'translucent'
 type ViewPreset = 'iso' | 'top' | 'front' | 'right'
 type Axis = 'x' | 'y' | 'z'
+type TextureTarget = 'model' | 'ground'
+
+const GROUND_TEXTURE_REPEAT = 10
+const GROUND_BASE_COLOR = '#2a2a2a'
 
 type ModelStats = {
   triangles: number
@@ -318,6 +323,14 @@ function clearTextureFromModel(root: Object3D) {
   })
 }
 
+function prepareGroundTexture(texture: Texture): Texture {
+  texture.wrapS = RepeatWrapping
+  texture.wrapT = RepeatWrapping
+  texture.repeat.set(GROUND_TEXTURE_REPEAT, GROUND_TEXTURE_REPEAT)
+  texture.needsUpdate = true
+  return texture
+}
+
 function applyViewMode(root: Object3D, mode: ViewMode) {
   root.traverse((child) => {
     if (!(child as Mesh).isMesh) return
@@ -432,16 +445,39 @@ function CameraDirector({
   return null
 }
 
+function GroundPlane({
+  size,
+  texture,
+}: {
+  size: number
+  texture: Texture | null
+}) {
+  return (
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.002, 0]} receiveShadow>
+      <planeGeometry args={[size, size]} />
+      <meshStandardMaterial
+        key={texture?.uuid ?? 'ground-base'}
+        map={texture}
+        color={texture ? '#ffffff' : GROUND_BASE_COLOR}
+        metalness={0.05}
+        roughness={0.92}
+      />
+    </mesh>
+  )
+}
+
 function Scene({
   model,
   showHelpers,
   viewPreset,
   cameraRequestId,
+  groundTexture,
 }: {
   model: LoadedModel | null
   showHelpers: boolean
   viewPreset: ViewPreset
   cameraRequestId: number
+  groundTexture: Texture | null
 }) {
   const gridSize = useMemo(() => {
     if (!model) return 40
@@ -454,6 +490,8 @@ function Scene({
       <ambientLight intensity={0.45} />
       <directionalLight position={[6, 10, 4]} intensity={1.15} />
       <directionalLight position={[-4, 3, -6]} intensity={0.35} />
+
+      <GroundPlane size={gridSize} texture={groundTexture} />
 
       {showHelpers && (
         <>
@@ -515,10 +553,16 @@ function ToolbarButton({
 export default function CADViewer() {
   const modelInputRef = useRef<HTMLInputElement>(null)
   const textureInputRef = useRef<HTMLInputElement>(null)
-  const textureUrlRef = useRef<string | null>(null)
+  const modelTextureUrlRef = useRef<string | null>(null)
+  const groundTextureUrlRef = useRef<string | null>(null)
   const modelRef = useRef<LoadedModel | null>(null)
+  const groundTextureRef = useRef<Texture | null>(null)
+
   const [model, setModel] = useState<LoadedModel | null>(null)
-  const [textureName, setTextureName] = useState<string | null>(null)
+  const [textureTarget, setTextureTarget] = useState<TextureTarget>('model')
+  const [modelTextureName, setModelTextureName] = useState<string | null>(null)
+  const [groundTextureName, setGroundTextureName] = useState<string | null>(null)
+  const [groundTexture, setGroundTexture] = useState<Texture | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -533,15 +577,28 @@ export default function CADViewer() {
   }, [model])
 
   useEffect(() => {
+    groundTextureRef.current = groundTexture
+  }, [groundTexture])
+
+  useEffect(() => {
     return () => {
-      if (textureUrlRef.current) URL.revokeObjectURL(textureUrlRef.current)
+      if (modelTextureUrlRef.current) URL.revokeObjectURL(modelTextureUrlRef.current)
+      if (groundTextureUrlRef.current) URL.revokeObjectURL(groundTextureUrlRef.current)
+      groundTextureRef.current?.dispose()
     }
   }, [])
 
-  const revokeTextureUrl = useCallback(() => {
-    if (textureUrlRef.current) {
-      URL.revokeObjectURL(textureUrlRef.current)
-      textureUrlRef.current = null
+  const revokeModelTextureUrl = useCallback(() => {
+    if (modelTextureUrlRef.current) {
+      URL.revokeObjectURL(modelTextureUrlRef.current)
+      modelTextureUrlRef.current = null
+    }
+  }, [])
+
+  const revokeGroundTextureUrl = useCallback(() => {
+    if (groundTextureUrlRef.current) {
+      URL.revokeObjectURL(groundTextureUrlRef.current)
+      groundTextureUrlRef.current = null
     }
   }, [])
 
@@ -550,31 +607,67 @@ export default function CADViewer() {
     setCameraRequestId((id) => id + 1)
   }, [])
 
-  const handleTextureFile = useCallback(
+  const applyModelTexture = useCallback(
     async (file: File) => {
       const current = modelRef.current
       if (!current) {
-        setError('Önce bir STL/OBJ modeli yükleyin, sonra kaplama seçin.')
+        setError('Model kaplaması için önce bir STL/OBJ modeli yükleyin.')
         return
       }
 
       setError(null)
-      setStatus(`Kaplama yükleniyor: ${file.name}`)
+      setStatus(`Model kaplaması yükleniyor: ${file.name}`)
 
       try {
         const { texture, url } = await loadTextureFromFile(file)
-        revokeTextureUrl()
-        textureUrlRef.current = url
+        revokeModelTextureUrl()
+        modelTextureUrlRef.current = url
         applyTextureToModel(current.root, texture)
         applyViewMode(current.root, viewMode)
-        setTextureName(file.name)
-        setStatus(`Kaplama: ${file.name}`)
+        setModelTextureName(file.name)
+        setStatus(`Model kaplaması: ${file.name}`)
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Kaplama yüklenemedi.'
         setError(message)
       }
     },
-    [revokeTextureUrl, viewMode],
+    [revokeModelTextureUrl, viewMode],
+  )
+
+  const applyGroundTexture = useCallback(
+    async (file: File) => {
+      setError(null)
+      setStatus(`Zemin kaplaması yükleniyor: ${file.name}`)
+
+      try {
+        const { texture, url } = await loadTextureFromFile(file)
+        prepareGroundTexture(texture)
+
+        setGroundTexture((prev) => {
+          prev?.dispose()
+          return texture
+        })
+        revokeGroundTextureUrl()
+        groundTextureUrlRef.current = url
+        setGroundTextureName(file.name)
+        setStatus(`Zemin kaplaması: ${file.name}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Kaplama yüklenemedi.'
+        setError(message)
+      }
+    },
+    [revokeGroundTextureUrl],
+  )
+
+  const handleTextureFile = useCallback(
+    async (file: File) => {
+      if (textureTarget === 'ground') {
+        await applyGroundTexture(file)
+        return
+      }
+      await applyModelTexture(file)
+    },
+    [applyGroundTexture, applyModelTexture, textureTarget],
   )
 
   const handleModelFile = useCallback(
@@ -585,8 +678,8 @@ export default function CADViewer() {
       try {
         const loaded = await loadModelFromFile(file)
         applyViewMode(loaded.root, viewMode)
-        revokeTextureUrl()
-        setTextureName(null)
+        revokeModelTextureUrl()
+        setModelTextureName(null)
         setModel((prev) => {
           if (prev) disposeObject(prev.root)
           return loaded
@@ -600,7 +693,7 @@ export default function CADViewer() {
         setStatus(null)
       }
     },
-    [revokeTextureUrl, viewMode],
+    [revokeModelTextureUrl, viewMode],
   )
 
   const handleFile = useCallback(
@@ -623,14 +716,25 @@ export default function CADViewer() {
   )
 
   const clearTexture = useCallback(() => {
+    if (textureTarget === 'ground') {
+      setGroundTexture((prev) => {
+        prev?.dispose()
+        return null
+      })
+      revokeGroundTextureUrl()
+      setGroundTextureName(null)
+      setStatus('Zemin kaplaması kaldırıldı')
+      return
+    }
+
     const current = modelRef.current
     if (!current) return
     clearTextureFromModel(current.root)
     applyViewMode(current.root, viewMode)
-    revokeTextureUrl()
-    setTextureName(null)
+    revokeModelTextureUrl()
+    setModelTextureName(null)
     setStatus(current.name)
-  }, [revokeTextureUrl, viewMode])
+  }, [revokeGroundTextureUrl, revokeModelTextureUrl, textureTarget, viewMode])
 
   const onViewModeChange = (mode: ViewMode) => {
     setViewMode(mode)
@@ -684,6 +788,10 @@ export default function CADViewer() {
     void handleFile(event.dataTransfer.files?.[0])
   }
 
+  const canUploadTexture = textureTarget === 'ground' || !!model
+  const hasActiveTexture =
+    textureTarget === 'ground' ? !!groundTextureName : !!modelTextureName
+
   return (
     <div
       className="cad-viewer"
@@ -703,6 +811,7 @@ export default function CADViewer() {
           showHelpers={showHelpers}
           viewPreset={viewPreset}
           cameraRequestId={cameraRequestId}
+          groundTexture={groundTexture}
         />
       </Canvas>
 
@@ -713,14 +822,22 @@ export default function CADViewer() {
           <ToolbarButton
             label="Kaplama Seç"
             onClick={() => textureInputRef.current?.click()}
-            disabled={!model}
-            title="Modele JPG/PNG/WebP kaplama uygula"
+            disabled={!canUploadTexture}
+            title={
+              textureTarget === 'ground'
+                ? 'Zemine JPG/PNG/WebP kaplama uygula'
+                : 'Modele JPG/PNG/WebP kaplama uygula'
+            }
           />
-          {textureName && (
+          {hasActiveTexture && (
             <ToolbarButton
               label="Kaplamayı Kaldır"
               onClick={clearTexture}
-              title="Kaplamayı temizle"
+              title={
+                textureTarget === 'ground'
+                  ? 'Zemin kaplamasını temizle'
+                  : 'Model kaplamasını temizle'
+              }
             />
           )}
           <input
@@ -736,6 +853,24 @@ export default function CADViewer() {
             accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
             className="file-input"
             onChange={onTextureInputChange}
+          />
+        </div>
+
+        <div className="tb-divider" />
+
+        <div className="tb-group">
+          <span className="tb-label">Kapsam</span>
+          <ToolbarButton
+            label="Kapsam: Model"
+            active={textureTarget === 'model'}
+            onClick={() => setTextureTarget('model')}
+            title="Kaplamayı modele uygula"
+          />
+          <ToolbarButton
+            label="Kapsam: Zemin"
+            active={textureTarget === 'ground'}
+            onClick={() => setTextureTarget('ground')}
+            title="Kaplamayı zemine uygula"
           />
         </div>
 
@@ -834,29 +969,41 @@ export default function CADViewer() {
         )}
       </header>
 
-      {model && (
+      {(model || groundTextureName) && (
         <aside className="model-info">
-          <div className="model-info-title">{model.name}</div>
-          <div className="model-info-row">
-            <span>Üçgen</span>
-            <strong>{formatTriangles(model.stats.triangles)}</strong>
-          </div>
-          <div className="model-info-row">
-            <span>X</span>
-            <strong>{formatLength(model.stats.size.x)}</strong>
-          </div>
-          <div className="model-info-row">
-            <span>Y</span>
-            <strong>{formatLength(model.stats.size.y)}</strong>
-          </div>
-          <div className="model-info-row">
-            <span>Z</span>
-            <strong>{formatLength(model.stats.size.z)}</strong>
-          </div>
-          {textureName && (
+          {model ? (
+            <>
+              <div className="model-info-title">{model.name}</div>
+              <div className="model-info-row">
+                <span>Üçgen</span>
+                <strong>{formatTriangles(model.stats.triangles)}</strong>
+              </div>
+              <div className="model-info-row">
+                <span>X</span>
+                <strong>{formatLength(model.stats.size.x)}</strong>
+              </div>
+              <div className="model-info-row">
+                <span>Y</span>
+                <strong>{formatLength(model.stats.size.y)}</strong>
+              </div>
+              <div className="model-info-row">
+                <span>Z</span>
+                <strong>{formatLength(model.stats.size.z)}</strong>
+              </div>
+            </>
+          ) : (
+            <div className="model-info-title">Sahne</div>
+          )}
+          {modelTextureName && (
             <div className="model-info-row">
-              <span>Kaplama</span>
-              <strong className="texture-name">{textureName}</strong>
+              <span>Model</span>
+              <strong className="texture-name">{modelTextureName}</strong>
+            </div>
+          )}
+          {groundTextureName && (
+            <div className="model-info-row">
+              <span>Zemin</span>
+              <strong className="texture-name">{groundTextureName}</strong>
             </div>
           )}
           <p className="model-info-note">Boyutlar birim olarak (genelde mm)</p>
@@ -867,7 +1014,11 @@ export default function CADViewer() {
         <div className="drop-overlay" aria-hidden>
           <div className="drop-panel">
             <span className="drop-title">Dosyayı bırakın</span>
-            <span className="drop-hint">STL / OBJ veya JPG / PNG / WebP</span>
+            <span className="drop-hint">
+              {textureTarget === 'ground'
+                ? 'Kaplama → Zemin (.jpg / .png)'
+                : 'STL / OBJ veya Model kaplaması'}
+            </span>
           </div>
         </div>
       )}
@@ -875,7 +1026,7 @@ export default function CADViewer() {
       {!isDragging && (
         <p className="empty-hint">
           STL / OBJ modellerinizi veya kaplamak istediğiniz Görsel (JPG/PNG) dosyalarını buraya
-          sürükleyin.
+          sürükleyin. Kaplama hedefi: {textureTarget === 'ground' ? 'Zemin' : 'Model'}.
         </p>
       )}
     </div>
