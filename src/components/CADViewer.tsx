@@ -21,6 +21,8 @@ import {
   Mesh,
   MeshStandardMaterial,
   Object3D,
+  Plane,
+  PlaneHelper,
   Raycaster,
   RepeatWrapping,
   Sphere,
@@ -77,6 +79,29 @@ type Measurement = {
   b: [number, number, number]
 }
 
+type ClipAxisState = {
+  enabled: boolean
+  value: number
+  inverted: boolean
+}
+
+type ClipBounds = {
+  min: { x: number; y: number; z: number }
+  max: { x: number; y: number; z: number }
+}
+
+const DEFAULT_CLIP_AXIS: ClipAxisState = {
+  enabled: false,
+  value: 0,
+  inverted: false,
+}
+
+const CLIP_HELPER_COLORS = {
+  x: 0xff5555,
+  y: 0x55ff88,
+  z: 0x5599ff,
+} as const
+
 const MODEL_EXTENSIONS = ['.stl', '.obj', '.step', '.stp', '.iges', '.igs'] as const
 const TEXTURE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'] as const
 const OCCT_EXTENSIONS = ['.step', '.stp', '.iges', '.igs'] as const
@@ -106,6 +131,151 @@ function isTextureFile(file: File): boolean {
 function createMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({ ...BASE_MATERIAL })
 }
+
+function applyClippingToObject(root: Object3D | null, planes: Plane[]) {
+  if (!root) return
+  const list = planes.length > 0 ? planes : []
+
+  root.traverse((child) => {
+    const mesh = child as Mesh
+    if (mesh.isMesh) {
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+      materials.forEach((mat) => {
+        if (!mat) return
+        mat.clippingPlanes = list
+        mat.clipShadows = list.length > 0
+        mat.needsUpdate = true
+      })
+    }
+
+    const lines = child as LineSegments
+    if (lines.isLineSegments) {
+      const materials = Array.isArray(lines.material) ? lines.material : [lines.material]
+      materials.forEach((mat) => {
+        if (!mat) return
+        mat.clippingPlanes = list
+        mat.needsUpdate = true
+      })
+    }
+  })
+}
+
+function updateClipPlane(plane: Plane, axis: Axis, value: number, inverted: boolean) {
+  if (axis === 'x') {
+    plane.normal.set(inverted ? 1 : -1, 0, 0)
+    plane.constant = inverted ? -value : value
+  } else if (axis === 'y') {
+    plane.normal.set(0, inverted ? 1 : -1, 0)
+    plane.constant = inverted ? -value : value
+  } else {
+    plane.normal.set(0, 0, inverted ? 1 : -1)
+    plane.constant = inverted ? -value : value
+  }
+  plane.normalize()
+}
+
+function getObjectClipBounds(root: Object3D | null): ClipBounds {
+  if (!root) {
+    return { min: { x: -10, y: 0, z: -10 }, max: { x: 10, y: 10, z: 10 } }
+  }
+  const box = new Box3().setFromObject(root)
+  if (box.isEmpty()) {
+    return { min: { x: -10, y: 0, z: -10 }, max: { x: 10, y: 10, z: 10 } }
+  }
+  const pad = 0.001
+  return {
+    min: { x: box.min.x - pad, y: box.min.y - pad, z: box.min.z - pad },
+    max: { x: box.max.x + pad, y: box.max.y + pad, z: box.max.z + pad },
+  }
+}
+
+function ClippingController({
+  model,
+  clipMasterEnabled,
+  clipX,
+  clipY,
+  clipZ,
+  draggingAxis,
+  showHelpersAlways,
+}: {
+  model: LoadedModel | null
+  clipMasterEnabled: boolean
+  clipX: ClipAxisState
+  clipY: ClipAxisState
+  clipZ: ClipAxisState
+  draggingAxis: Axis | null
+  showHelpersAlways: boolean
+}) {
+  const { gl } = useThree()
+  const planes = useMemo(
+    () => ({
+      x: new Plane(new Vector3(-1, 0, 0), 0),
+      y: new Plane(new Vector3(0, -1, 0), 0),
+      z: new Plane(new Vector3(0, 0, -1), 0),
+    }),
+    [],
+  )
+
+  const helpers = useMemo(() => {
+    const size = 40
+    return {
+      x: new PlaneHelper(planes.x, size, CLIP_HELPER_COLORS.x),
+      y: new PlaneHelper(planes.y, size, CLIP_HELPER_COLORS.y),
+      z: new PlaneHelper(planes.z, size, CLIP_HELPER_COLORS.z),
+    }
+  }, [planes])
+
+  useEffect(() => {
+    gl.localClippingEnabled = true
+  }, [gl])
+
+  useEffect(() => {
+    updateClipPlane(planes.x, 'x', clipX.value, clipX.inverted)
+    updateClipPlane(planes.y, 'y', clipY.value, clipY.inverted)
+    updateClipPlane(planes.z, 'z', clipZ.value, clipZ.inverted)
+
+    const active: Plane[] = []
+    if (clipMasterEnabled) {
+      if (clipX.enabled) active.push(planes.x)
+      if (clipY.enabled) active.push(planes.y)
+      if (clipZ.enabled) active.push(planes.z)
+    }
+
+    applyClippingToObject(model?.root ?? null, active)
+
+    const diag = model
+      ? Math.max(model.stats.size.x, model.stats.size.y, model.stats.size.z, 10) * 1.4
+      : 40
+    helpers.x.size = diag
+    helpers.y.size = diag
+    helpers.z.size = diag
+    helpers.x.updateMatrixWorld(true)
+    helpers.y.updateMatrixWorld(true)
+    helpers.z.updateMatrixWorld(true)
+  }, [clipMasterEnabled, clipX, clipY, clipZ, model, planes, helpers])
+
+  const showX =
+    clipMasterEnabled &&
+    clipX.enabled &&
+    (showHelpersAlways || draggingAxis === 'x')
+  const showY =
+    clipMasterEnabled &&
+    clipY.enabled &&
+    (showHelpersAlways || draggingAxis === 'y')
+  const showZ =
+    clipMasterEnabled &&
+    clipZ.enabled &&
+    (showHelpersAlways || draggingAxis === 'z')
+
+  return (
+    <>
+      {showX && <primitive object={helpers.x} />}
+      {showY && <primitive object={helpers.y} />}
+      {showZ && <primitive object={helpers.z} />}
+    </>
+  )
+}
+
 
 function attachCadEdges(mesh: Mesh) {
   if (mesh.getObjectByName('cad-edges')) return
@@ -696,6 +866,12 @@ function Scene({
   measurements,
   pendingPoint,
   onMeasureHit,
+  clipMasterEnabled,
+  clipX,
+  clipY,
+  clipZ,
+  clipDraggingAxis,
+  showClipHelpers,
 }: {
   model: LoadedModel | null
   showHelpers: boolean
@@ -706,6 +882,12 @@ function Scene({
   measurements: Measurement[]
   pendingPoint: [number, number, number] | null
   onMeasureHit: (point: Vector3) => void
+  clipMasterEnabled: boolean
+  clipX: ClipAxisState
+  clipY: ClipAxisState
+  clipZ: ClipAxisState
+  clipDraggingAxis: Axis | null
+  showClipHelpers: boolean
 }) {
   const gridSize = useMemo(() => {
     if (!model) return 40
@@ -733,6 +915,16 @@ function Scene({
       )}
 
       {model && <primitive object={model.root} />}
+
+      <ClippingController
+        model={model}
+        clipMasterEnabled={clipMasterEnabled}
+        clipX={clipX}
+        clipY={clipY}
+        clipZ={clipZ}
+        draggingAxis={clipDraggingAxis}
+        showHelpersAlways={showClipHelpers}
+      />
 
       <MeasureClickHandler
         active={measureMode && !!model}
@@ -817,6 +1009,13 @@ export default function CADViewer() {
   const [measureMode, setMeasureMode] = useState(false)
   const [measurements, setMeasurements] = useState<Measurement[]>([])
   const [pendingPoint, setPendingPoint] = useState<[number, number, number] | null>(null)
+  const [clipPanelOpen, setClipPanelOpen] = useState(false)
+  const [clipMasterEnabled, setClipMasterEnabled] = useState(false)
+  const [clipX, setClipX] = useState<ClipAxisState>(DEFAULT_CLIP_AXIS)
+  const [clipY, setClipY] = useState<ClipAxisState>(DEFAULT_CLIP_AXIS)
+  const [clipZ, setClipZ] = useState<ClipAxisState>(DEFAULT_CLIP_AXIS)
+  const [clipDraggingAxis, setClipDraggingAxis] = useState<Axis | null>(null)
+  const [showClipHelpers, setShowClipHelpers] = useState(false)
   const dragDepth = useRef(0)
   const modelColorRef = useRef(modelColor)
   const pendingPointRef = useRef<[number, number, number] | null>(null)
@@ -941,6 +1140,11 @@ export default function CADViewer() {
         setMeasurements([])
         setPendingPoint(null)
         pendingPointRef.current = null
+        const bounds = getObjectClipBounds(loaded.root)
+        setClipX({ enabled: false, value: bounds.max.x, inverted: false })
+        setClipY({ enabled: false, value: bounds.max.y, inverted: false })
+        setClipZ({ enabled: false, value: bounds.max.z, inverted: false })
+        setClipMasterEnabled(false)
         setModel((prev) => {
           if (prev) disposeObject(prev.root)
           return loaded
@@ -1050,6 +1254,26 @@ export default function CADViewer() {
     })
   }, [])
 
+  const clipBounds = useMemo(() => getObjectClipBounds(model?.root ?? null), [model])
+
+  const onClipAxisToggle = (axis: Axis, enabled: boolean) => {
+    if (axis === 'x') setClipX((s) => ({ ...s, enabled }))
+    if (axis === 'y') setClipY((s) => ({ ...s, enabled }))
+    if (axis === 'z') setClipZ((s) => ({ ...s, enabled }))
+  }
+
+  const onClipValueChange = (axis: Axis, value: number) => {
+    if (axis === 'x') setClipX((s) => ({ ...s, value }))
+    if (axis === 'y') setClipY((s) => ({ ...s, value }))
+    if (axis === 'z') setClipZ((s) => ({ ...s, value }))
+  }
+
+  const onClipInvert = (axis: Axis) => {
+    if (axis === 'x') setClipX((s) => ({ ...s, inverted: !s.inverted }))
+    if (axis === 'y') setClipY((s) => ({ ...s, inverted: !s.inverted }))
+    if (axis === 'z') setClipZ((s) => ({ ...s, inverted: !s.inverted }))
+  }
+
   const onViewModeChange = (mode: ViewMode) => {
     setViewMode(mode)
     if (model) applyViewMode(model.root, mode)
@@ -1117,7 +1341,10 @@ export default function CADViewer() {
       <Canvas
         style={{ width: '100%', height: '100%' }}
         camera={{ position: [4, 4, 4], fov: 50 }}
-        gl={{ antialias: true }}
+        gl={{ antialias: true, localClippingEnabled: true }}
+        onCreated={({ gl }) => {
+          gl.localClippingEnabled = true
+        }}
       >
         <color attach="background" args={['#1a1a1a']} />
         <Scene
@@ -1130,6 +1357,12 @@ export default function CADViewer() {
           measurements={measurements}
           pendingPoint={pendingPoint}
           onMeasureHit={onMeasureHit}
+          clipMasterEnabled={clipMasterEnabled}
+          clipX={clipX}
+          clipY={clipY}
+          clipZ={clipZ}
+          clipDraggingAxis={clipDraggingAxis}
+          showClipHelpers={showClipHelpers}
         />
       </Canvas>
 
@@ -1205,6 +1438,19 @@ export default function CADViewer() {
             label="Ölçümleri Temizle"
             onClick={clearMeasurements}
             disabled={measurements.length === 0 && !pendingPoint}
+          />
+        </div>
+
+        <div className="tb-divider" />
+
+        <div className="tb-group">
+          <span className="tb-label">Kesit</span>
+          <ToolbarButton
+            label="Kesit Al"
+            active={clipPanelOpen}
+            onClick={() => setClipPanelOpen((v) => !v)}
+            disabled={!model}
+            title="3D kesit paneli"
           />
         </div>
 
@@ -1320,6 +1566,83 @@ export default function CADViewer() {
           </div>
         )}
       </header>
+
+      {clipPanelOpen && model && (
+        <aside className="clip-panel">
+          <div className="clip-panel-header">
+            <strong>Kesit Kontrolü</strong>
+            <button
+              type="button"
+              className="tb-btn"
+              onClick={() => setClipPanelOpen(false)}
+              title="Paneli kapat"
+            >
+              Kapat
+            </button>
+          </div>
+
+          <label className="clip-row clip-master">
+            <input
+              type="checkbox"
+              checked={clipMasterEnabled}
+              onChange={(e) => setClipMasterEnabled(e.target.checked)}
+            />
+            <span>Kesit Modu Aç/Kapat</span>
+          </label>
+
+          <label className="clip-row">
+            <input
+              type="checkbox"
+              checked={showClipHelpers}
+              onChange={(e) => setShowClipHelpers(e.target.checked)}
+            />
+            <span>Yardımcı düzlemleri göster</span>
+          </label>
+
+          {([
+            { axis: 'x' as const, label: 'X Ekseni', state: clipX, min: clipBounds.min.x, max: clipBounds.max.x, color: '#ff6b6b' },
+            { axis: 'y' as const, label: 'Y Ekseni', state: clipY, min: clipBounds.min.y, max: clipBounds.max.y, color: '#6bff9a' },
+            { axis: 'z' as const, label: 'Z Ekseni', state: clipZ, min: clipBounds.min.z, max: clipBounds.max.z, color: '#6ba8ff' },
+          ]).map(({ axis, label, state, min, max, color }) => (
+            <div key={axis} className={`clip-axis${state.enabled && clipMasterEnabled ? ' is-on' : ''}`}>
+              <div className="clip-axis-top">
+                <label className="clip-row">
+                  <input
+                    type="checkbox"
+                    checked={state.enabled}
+                    disabled={!clipMasterEnabled}
+                    onChange={(e) => onClipAxisToggle(axis, e.target.checked)}
+                  />
+                  <span style={{ color }}>{label}</span>
+                </label>
+                <button
+                  type="button"
+                  className={`tb-btn${state.inverted ? ' is-active' : ''}`}
+                  disabled={!clipMasterEnabled || !state.enabled}
+                  onClick={() => onClipInvert(axis)}
+                  title="Kesit yönünü ters çevir"
+                >
+                  Yönü Ters Çevir
+                </button>
+              </div>
+              <input
+                type="range"
+                className="clip-slider"
+                min={min}
+                max={max}
+                step={(max - min) / 500 || 0.01}
+                value={Math.min(max, Math.max(min, state.value))}
+                disabled={!clipMasterEnabled || !state.enabled}
+                onPointerDown={() => setClipDraggingAxis(axis)}
+                onPointerUp={() => setClipDraggingAxis(null)}
+                onPointerCancel={() => setClipDraggingAxis(null)}
+                onChange={(e) => onClipValueChange(axis, Number(e.target.value))}
+              />
+              <div className="clip-axis-value">{state.value.toFixed(2)}</div>
+            </div>
+          ))}
+        </aside>
+      )}
 
       {(model || groundTextureName) && (
         <aside className="model-info">
