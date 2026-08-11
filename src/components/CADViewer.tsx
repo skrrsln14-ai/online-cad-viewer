@@ -11,6 +11,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import {
   Box3,
+  BufferAttribute,
   BufferGeometry,
   Group,
   Material,
@@ -18,6 +19,9 @@ import {
   MeshStandardMaterial,
   Object3D,
   Sphere,
+  SRGBColorSpace,
+  Texture,
+  TextureLoader,
   Vector3,
 } from 'three'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
@@ -51,7 +55,8 @@ const BASE_MATERIAL = {
   roughness: 0.35,
 } as const
 
-const ACCEPTED_EXTENSIONS = ['.stl', '.obj'] as const
+const MODEL_EXTENSIONS = ['.stl', '.obj'] as const
+const TEXTURE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'] as const
 
 const VIEW_DIRECTIONS: Record<ViewPreset, Vector3> = {
   iso: new Vector3(1, 0.85, 1).normalize(),
@@ -65,8 +70,14 @@ function getExtension(filename: string): string {
   return i >= 0 ? filename.slice(i).toLowerCase() : ''
 }
 
-function isAcceptedFile(file: File): boolean {
-  return (ACCEPTED_EXTENSIONS as readonly string[]).includes(getExtension(file.name))
+function isModelFile(file: File): boolean {
+  return (MODEL_EXTENSIONS as readonly string[]).includes(getExtension(file.name))
+}
+
+function isTextureFile(file: File): boolean {
+  const ext = getExtension(file.name)
+  if ((TEXTURE_EXTENSIONS as readonly string[]).includes(ext)) return true
+  return file.type.startsWith('image/')
 }
 
 function createMaterial(): MeshStandardMaterial {
@@ -168,12 +179,142 @@ async function loadModelFromFile(file: File): Promise<LoadedModel> {
 }
 
 function disposeObject(root: Object3D) {
+  const disposedTextures = new Set<Texture>()
+
   root.traverse((child) => {
     if (!(child as Mesh).isMesh) return
     const mesh = child as Mesh
     mesh.geometry?.dispose()
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
-    materials.forEach((mat: Material) => mat.dispose())
+    materials.forEach((mat: Material) => {
+      if (mat instanceof MeshStandardMaterial && mat.map) {
+        if (!disposedTextures.has(mat.map)) {
+          disposedTextures.add(mat.map)
+          mat.map.dispose()
+        }
+        mat.map = null
+      }
+      mat.dispose()
+    })
+  })
+}
+
+/** STL and some OBJs lack UVs — generate a simple box projection so textures can show. */
+function ensureBoxUVs(root: Object3D) {
+  root.traverse((child) => {
+    if (!(child as Mesh).isMesh) return
+    const geometry = (child as Mesh).geometry as BufferGeometry
+    if (!geometry || geometry.getAttribute('uv')) return
+
+    geometry.computeBoundingBox()
+    geometry.computeVertexNormals()
+    const bbox = geometry.boundingBox
+    if (!bbox) return
+
+    const size = bbox.getSize(new Vector3())
+    const sx = Math.max(size.x, 1e-6)
+    const sy = Math.max(size.y, 1e-6)
+    const sz = Math.max(size.z, 1e-6)
+    const pos = geometry.attributes.position
+    const nrm = geometry.attributes.normal
+    const uvs = new Float32Array(pos.count * 2)
+
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i)
+      const y = pos.getY(i)
+      const z = pos.getZ(i)
+      const nx = Math.abs(nrm.getX(i))
+      const ny = Math.abs(nrm.getY(i))
+      const nz = Math.abs(nrm.getZ(i))
+
+      let u = 0
+      let v = 0
+      if (nx >= ny && nx >= nz) {
+        u = (z - bbox.min.z) / sz
+        v = (y - bbox.min.y) / sy
+      } else if (ny >= nx && ny >= nz) {
+        u = (x - bbox.min.x) / sx
+        v = (z - bbox.min.z) / sz
+      } else {
+        u = (x - bbox.min.x) / sx
+        v = (y - bbox.min.y) / sy
+      }
+      uvs[i * 2] = u
+      uvs[i * 2 + 1] = v
+    }
+
+    geometry.setAttribute('uv', new BufferAttribute(uvs, 2))
+  })
+}
+
+function loadTextureFromFile(file: File): Promise<{ texture: Texture; url: string }> {
+  const url = URL.createObjectURL(file)
+  const loader = new TextureLoader()
+
+  return new Promise((resolve, reject) => {
+    loader.load(
+      url,
+      (texture) => {
+        texture.colorSpace = SRGBColorSpace
+        texture.flipY = true
+        texture.needsUpdate = true
+        resolve({ texture, url })
+      },
+      undefined,
+      (err) => {
+        URL.revokeObjectURL(url)
+        reject(err instanceof Error ? err : new Error('Kaplama yüklenemedi.'))
+      },
+    )
+  })
+}
+
+function applyTextureToModel(root: Object3D, texture: Texture) {
+  ensureBoxUVs(root)
+
+  const disposed = new Set<Texture>()
+
+  root.traverse((child) => {
+    if (!(child as Mesh).isMesh) return
+    const mesh = child as Mesh
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+
+    materials.forEach((mat) => {
+      if (!(mat instanceof MeshStandardMaterial)) return
+      if (mat.map && !disposed.has(mat.map)) {
+        disposed.add(mat.map)
+        mat.map.dispose()
+      }
+      mat.map = texture
+      mat.color.set('#ffffff')
+      mat.metalness = Math.min(mat.metalness, 0.35)
+      mat.roughness = Math.max(mat.roughness, 0.45)
+      mat.needsUpdate = true
+    })
+  })
+}
+
+function clearTextureFromModel(root: Object3D) {
+  const disposed = new Set<Texture>()
+
+  root.traverse((child) => {
+    if (!(child as Mesh).isMesh) return
+    const mesh = child as Mesh
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+    materials.forEach((mat) => {
+      if (!(mat instanceof MeshStandardMaterial)) return
+      if (mat.map) {
+        if (!disposed.has(mat.map)) {
+          disposed.add(mat.map)
+          mat.map.dispose()
+        }
+        mat.map = null
+      }
+      mat.color.set(BASE_MATERIAL.color)
+      mat.metalness = BASE_MATERIAL.metalness
+      mat.roughness = BASE_MATERIAL.roughness
+      mat.needsUpdate = true
+    })
   })
 }
 
@@ -188,8 +329,10 @@ function applyViewMode(root: Object3D, mode: ViewMode) {
       mat.transparent = mode === 'translucent'
       mat.opacity = mode === 'translucent' ? 0.42 : 1
       mat.depthWrite = mode !== 'translucent'
-      mat.metalness = mode === 'wireframe' ? 0.2 : BASE_MATERIAL.metalness
-      mat.roughness = mode === 'wireframe' ? 0.6 : BASE_MATERIAL.roughness
+      if (!mat.map) {
+        mat.metalness = mode === 'wireframe' ? 0.2 : BASE_MATERIAL.metalness
+        mat.roughness = mode === 'wireframe' ? 0.6 : BASE_MATERIAL.roughness
+      }
       mat.needsUpdate = true
     })
   })
@@ -370,8 +513,12 @@ function ToolbarButton({
 }
 
 export default function CADViewer() {
-  const inputRef = useRef<HTMLInputElement>(null)
+  const modelInputRef = useRef<HTMLInputElement>(null)
+  const textureInputRef = useRef<HTMLInputElement>(null)
+  const textureUrlRef = useRef<string | null>(null)
+  const modelRef = useRef<LoadedModel | null>(null)
   const [model, setModel] = useState<LoadedModel | null>(null)
+  const [textureName, setTextureName] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -381,26 +528,65 @@ export default function CADViewer() {
   const [cameraRequestId, setCameraRequestId] = useState(0)
   const dragDepth = useRef(0)
 
+  useEffect(() => {
+    modelRef.current = model
+  }, [model])
+
+  useEffect(() => {
+    return () => {
+      if (textureUrlRef.current) URL.revokeObjectURL(textureUrlRef.current)
+    }
+  }, [])
+
+  const revokeTextureUrl = useCallback(() => {
+    if (textureUrlRef.current) {
+      URL.revokeObjectURL(textureUrlRef.current)
+      textureUrlRef.current = null
+    }
+  }, [])
+
   const requestCameraView = useCallback((preset: ViewPreset) => {
     setViewPreset(preset)
     setCameraRequestId((id) => id + 1)
   }, [])
 
-  const handleFile = useCallback(
-    async (file: File | undefined | null) => {
-      if (!file) return
-
-      if (!isAcceptedFile(file)) {
-        setError('Yalnızca .stl veya .obj dosyaları desteklenir.')
+  const handleTextureFile = useCallback(
+    async (file: File) => {
+      const current = modelRef.current
+      if (!current) {
+        setError('Önce bir STL/OBJ modeli yükleyin, sonra kaplama seçin.')
         return
       }
 
+      setError(null)
+      setStatus(`Kaplama yükleniyor: ${file.name}`)
+
+      try {
+        const { texture, url } = await loadTextureFromFile(file)
+        revokeTextureUrl()
+        textureUrlRef.current = url
+        applyTextureToModel(current.root, texture)
+        applyViewMode(current.root, viewMode)
+        setTextureName(file.name)
+        setStatus(`Kaplama: ${file.name}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Kaplama yüklenemedi.'
+        setError(message)
+      }
+    },
+    [revokeTextureUrl, viewMode],
+  )
+
+  const handleModelFile = useCallback(
+    async (file: File) => {
       setError(null)
       setStatus(`Yükleniyor: ${file.name}`)
 
       try {
         const loaded = await loadModelFromFile(file)
         applyViewMode(loaded.root, viewMode)
+        revokeTextureUrl()
+        setTextureName(null)
         setModel((prev) => {
           if (prev) disposeObject(prev.root)
           return loaded
@@ -414,8 +600,37 @@ export default function CADViewer() {
         setStatus(null)
       }
     },
-    [viewMode],
+    [revokeTextureUrl, viewMode],
   )
+
+  const handleFile = useCallback(
+    async (file: File | undefined | null) => {
+      if (!file) return
+
+      if (isTextureFile(file)) {
+        await handleTextureFile(file)
+        return
+      }
+
+      if (isModelFile(file)) {
+        await handleModelFile(file)
+        return
+      }
+
+      setError('Desteklenen dosyalar: .stl, .obj veya .jpg / .jpeg / .png / .webp')
+    },
+    [handleModelFile, handleTextureFile],
+  )
+
+  const clearTexture = useCallback(() => {
+    const current = modelRef.current
+    if (!current) return
+    clearTextureFromModel(current.root)
+    applyViewMode(current.root, viewMode)
+    revokeTextureUrl()
+    setTextureName(null)
+    setStatus(current.name)
+  }, [revokeTextureUrl, viewMode])
 
   const onViewModeChange = (mode: ViewMode) => {
     setViewMode(mode)
@@ -430,9 +645,15 @@ export default function CADViewer() {
     requestCameraView(viewPreset)
   }
 
-  const onInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+  const onModelInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     void handleFile(file)
+    event.target.value = ''
+  }
+
+  const onTextureInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (file) void handleTextureFile(file)
     event.target.value = ''
   }
 
@@ -488,13 +709,33 @@ export default function CADViewer() {
       <header className="cad-toolbar">
         <div className="tb-group">
           <span className="tb-label">Dosya</span>
-          <ToolbarButton label="Dosya Yükle" onClick={() => inputRef.current?.click()} />
+          <ToolbarButton label="Dosya Yükle" onClick={() => modelInputRef.current?.click()} />
+          <ToolbarButton
+            label="Kaplama Seç"
+            onClick={() => textureInputRef.current?.click()}
+            disabled={!model}
+            title="Modele JPG/PNG/WebP kaplama uygula"
+          />
+          {textureName && (
+            <ToolbarButton
+              label="Kaplamayı Kaldır"
+              onClick={clearTexture}
+              title="Kaplamayı temizle"
+            />
+          )}
           <input
-            ref={inputRef}
+            ref={modelInputRef}
             type="file"
             accept=".stl,.obj,model/stl,model/obj,application/sla"
             className="file-input"
-            onChange={onInputChange}
+            onChange={onModelInputChange}
+          />
+          <input
+            ref={textureInputRef}
+            type="file"
+            accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+            className="file-input"
+            onChange={onTextureInputChange}
           />
         </div>
 
@@ -612,6 +853,12 @@ export default function CADViewer() {
             <span>Z</span>
             <strong>{formatLength(model.stats.size.z)}</strong>
           </div>
+          {textureName && (
+            <div className="model-info-row">
+              <span>Kaplama</span>
+              <strong className="texture-name">{textureName}</strong>
+            </div>
+          )}
           <p className="model-info-note">Boyutlar birim olarak (genelde mm)</p>
         </aside>
       )}
@@ -620,14 +867,15 @@ export default function CADViewer() {
         <div className="drop-overlay" aria-hidden>
           <div className="drop-panel">
             <span className="drop-title">Dosyayı bırakın</span>
-            <span className="drop-hint">.stl veya .obj</span>
+            <span className="drop-hint">STL / OBJ veya JPG / PNG / WebP</span>
           </div>
         </div>
       )}
 
-      {!model && !isDragging && (
+      {!isDragging && (
         <p className="empty-hint">
-          STL / OBJ dosyasını sürükleyip bırakın veya Dosya Yükle’ye tıklayın
+          STL / OBJ modellerinizi veya kaplamak istediğiniz Görsel (JPG/PNG) dosyalarını buraya
+          sürükleyin.
         </p>
       )}
     </div>

@@ -186,6 +186,13 @@
   color: #a8a8a8;
 }
 
+.model-info-row .texture-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .empty-hint {
   position: absolute;
   left: 50%;
@@ -200,7 +207,9 @@
   background: rgba(18, 18, 18, 0.7);
   border: 1px solid rgba(255, 255, 255, 0.08);
   pointer-events: none;
-  white-space: nowrap;
+  max-width: min(560px, calc(100% - 32px));
+  text-align: center;
+  white-space: normal;
 }
 
 @media (max-width: 900px) {
