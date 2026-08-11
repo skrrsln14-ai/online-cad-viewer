@@ -14,6 +14,7 @@ import {
   BufferAttribute,
   BufferGeometry,
   Group,
+  LineSegments,
   Material,
   Mesh,
   MeshStandardMaterial,
@@ -27,6 +28,7 @@ import {
 } from 'three'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
+import { loadOcctContent } from '../lib/loadOcctModel'
 import './CADViewer.css'
 
 type ViewMode = 'solid' | 'wireframe' | 'translucent'
@@ -60,8 +62,9 @@ const BASE_MATERIAL = {
   roughness: 0.35,
 } as const
 
-const MODEL_EXTENSIONS = ['.stl', '.obj'] as const
+const MODEL_EXTENSIONS = ['.stl', '.obj', '.step', '.stp', '.iges', '.igs'] as const
 const TEXTURE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'] as const
+const OCCT_EXTENSIONS = ['.step', '.stp', '.iges', '.igs'] as const
 
 const VIEW_DIRECTIONS: Record<ViewPreset, Vector3> = {
   iso: new Vector3(1, 0.85, 1).normalize(),
@@ -175,6 +178,8 @@ async function loadModelFromFile(file: File): Promise<LoadedModel> {
     content = createStlContent(await file.arrayBuffer())
   } else if (ext === '.obj') {
     content = createObjContent(await file.text())
+  } else if ((OCCT_EXTENSIONS as readonly string[]).includes(ext)) {
+    content = await loadOcctContent(file)
   } else {
     throw new Error(`Desteklenmeyen dosya türü: ${ext || 'bilinmiyor'}`)
   }
@@ -187,6 +192,18 @@ function disposeObject(root: Object3D) {
   const disposedTextures = new Set<Texture>()
 
   root.traverse((child) => {
+    if ((child as LineSegments).isLineSegments) {
+      const lines = child as LineSegments
+      lines.geometry?.dispose()
+      const lineMats = Array.isArray(lines.material) ? lines.material : [lines.material]
+      lineMats.forEach((mat) => {
+        if (mat !== null && typeof mat === 'object' && 'dispose' in mat) {
+          ;(mat as Material).dispose()
+        }
+      })
+      return
+    }
+
     if (!(child as Mesh).isMesh) return
     const mesh = child as Mesh
     mesh.geometry?.dispose()
@@ -673,7 +690,11 @@ export default function CADViewer() {
   const handleModelFile = useCallback(
     async (file: File) => {
       setError(null)
-      setStatus(`Yükleniyor: ${file.name}`)
+      setStatus(
+        /\.(step|stp|iges|igs)$/i.test(file.name)
+          ? `OpenCascade ile parse ediliyor: ${file.name}`
+          : `Yükleniyor: ${file.name}`,
+      )
 
       try {
         const loaded = await loadModelFromFile(file)
@@ -710,7 +731,9 @@ export default function CADViewer() {
         return
       }
 
-      setError('Desteklenen dosyalar: .stl, .obj veya .jpg / .jpeg / .png / .webp')
+      setError(
+        'Desteklenen dosyalar: .stl, .obj, .step, .stp, .iges, .igs veya .jpg / .jpeg / .png / .webp',
+      )
     },
     [handleModelFile, handleTextureFile],
   )
@@ -843,7 +866,7 @@ export default function CADViewer() {
           <input
             ref={modelInputRef}
             type="file"
-            accept=".stl,.obj,model/stl,model/obj,application/sla"
+            accept=".stl,.obj,.step,.stp,.iges,.igs,model/stl,model/obj,application/sla,model/step,application/step"
             className="file-input"
             onChange={onModelInputChange}
           />
@@ -1017,7 +1040,7 @@ export default function CADViewer() {
             <span className="drop-hint">
               {textureTarget === 'ground'
                 ? 'Kaplama → Zemin (.jpg / .png)'
-                : 'STL / OBJ veya Model kaplaması'}
+                : 'STL / OBJ / STEP / IGES veya Model kaplaması'}
             </span>
           </div>
         </div>
@@ -1025,8 +1048,9 @@ export default function CADViewer() {
 
       {!isDragging && (
         <p className="empty-hint">
-          STL / OBJ modellerinizi veya kaplamak istediğiniz Görsel (JPG/PNG) dosyalarını buraya
-          sürükleyin. Kaplama hedefi: {textureTarget === 'ground' ? 'Zemin' : 'Model'}.
+          STL / OBJ / STEP / IGES modellerinizi veya kaplamak istediğiniz Görsel (JPG/PNG)
+          dosyalarını buraya sürükleyin. Kaplama hedefi:{' '}
+          {textureTarget === 'ground' ? 'Zemin' : 'Model'}.
         </p>
       )}
     </div>
