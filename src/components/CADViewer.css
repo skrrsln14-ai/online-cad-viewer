@@ -24,6 +24,7 @@
   align-items: center;
   gap: 8px 10px;
   padding: 10px 12px;
+  padding-right: 148px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(18, 18, 20, 0.55);
@@ -520,7 +521,32 @@
   white-space: normal;
 }
 
+/* —— ViewCube chrome (WebGL gizmo sits in the same corner) —— */
+.viewcube-frame {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 120px;
+  height: 120px;
+  z-index: 9;
+  pointer-events: none;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background:
+    radial-gradient(circle at 35% 30%, rgba(110, 182, 255, 0.12), transparent 55%),
+    rgba(14, 16, 20, 0.45);
+  backdrop-filter: blur(10px) saturate(1.15);
+  -webkit-backdrop-filter: blur(10px) saturate(1.15);
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
 @media (max-width: 900px) {
+  .cad-toolbar {
+    padding-right: 140px;
+  }
+
   .tb-divider {
     display: none;
   }

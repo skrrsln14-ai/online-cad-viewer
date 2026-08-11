@@ -8,7 +8,7 @@ import {
   type DragEvent,
 } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { Html, Line, OrbitControls } from '@react-three/drei'
+import { GizmoHelper, GizmoViewcube, Html, Line, OrbitControls } from '@react-three/drei'
 import {
   AlwaysStencilFunc,
   BackSide,
@@ -176,6 +176,18 @@ const VIEW_DIRECTIONS: Record<ViewPreset, Vector3> = {
   front: new Vector3(0, 0.12, 1).normalize(),
   right: new Vector3(1, 0.12, 0).normalize(),
 }
+
+/** Box face order: +X -X +Y -Y +Z -Z */
+const VIEWCUBE_FACES = ['SAĞ', 'SOL', 'ÜST', 'ALT', 'ÖN', 'ARKA'] as const
+
+const VIEWCUBE_STYLE = {
+  color: '#2a3038',
+  hoverColor: '#6eb6ff',
+  textColor: '#f0f3f7',
+  strokeColor: '#0c0e12',
+  opacity: 0.94,
+  font: 'bold 20px "Segoe UI", system-ui, sans-serif',
+} as const
 
 function getExtension(filename: string): string {
   const i = filename.lastIndexOf('.')
@@ -1386,6 +1398,20 @@ function Scene({
         focusRequestId={focusRequestId}
       />
       <OrbitControls makeDefault />
+
+      <GizmoHelper alignment="top-right" margin={[76, 76]} renderPriority={2}>
+        <group scale={2}>
+          <GizmoViewcube
+            faces={[...VIEWCUBE_FACES]}
+            color={VIEWCUBE_STYLE.color}
+            hoverColor={VIEWCUBE_STYLE.hoverColor}
+            textColor={VIEWCUBE_STYLE.textColor}
+            strokeColor={VIEWCUBE_STYLE.strokeColor}
+            opacity={VIEWCUBE_STYLE.opacity}
+            font={VIEWCUBE_STYLE.font}
+          />
+        </group>
+      </GizmoHelper>
     </>
   )
 }
@@ -1863,6 +1889,8 @@ export default function CADViewer() {
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
+      <div className="viewcube-frame" aria-hidden="true" />
+
       <Canvas
         style={{ width: '100%', height: '100%' }}
         camera={{ position: [4, 4, 4], fov: 50 }}
