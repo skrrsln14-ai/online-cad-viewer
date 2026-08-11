@@ -13,6 +13,9 @@ import { Environment, Html, Line, OrbitControls } from '@react-three/drei'
 import type { PresetsType } from '@react-three/drei/helpers/environment-assets'
 import {
   AlwaysStencilFunc,
+  AnimationAction,
+  AnimationClip,
+  AnimationMixer,
   BackSide,
   Box3,
   BufferAttribute,
@@ -25,6 +28,8 @@ import {
   IncrementWrapStencilOp,
   LineBasicMaterial,
   LineSegments,
+  LoopOnce,
+  LoopRepeat,
   Material,
   Mesh,
   MeshBasicMaterial,
@@ -38,6 +43,7 @@ import {
   Raycaster,
   RepeatWrapping,
   ReplaceStencilOp,
+  ShaderMaterial,
   Sphere,
   SRGBColorSpace,
   Texture,
@@ -48,6 +54,7 @@ import {
 } from 'three'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { loadOcctContent } from '../lib/loadOcctModel'
 import ViewCube, { CameraOrientationPublisher } from './ViewCube'
 import './CADViewer.css'
@@ -80,6 +87,7 @@ type LoadedModel = {
   root: Group
   name: string
   stats: ModelStats
+  animations: AnimationClip[]
 }
 
 type OrbitControlsLike = {
@@ -97,6 +105,10 @@ const BASE_MATERIAL = {
 const EDGE_THRESHOLD_DEG = 35
 const EDGE_COLOR = '#1a1a1a'
 const DEFAULT_MODEL_COLOR = '#c0c6cc'
+const OVERHANG_ANGLE_DEG = 45
+/** Faces with worldNormal·up below this need support (downward past 45°). */
+const OVERHANG_DOT_THRESHOLD = Math.cos(((90 + OVERHANG_ANGLE_DEG) * Math.PI) / 180)
+const PRINT_MAT_BACKUP_KEY = 'cadPrintMatBackup'
 
 type Measurement = {
   id: string
@@ -182,9 +194,20 @@ function showAllMeshes(root: Object3D) {
   })
 }
 
-const MODEL_EXTENSIONS = ['.stl', '.obj', '.step', '.stp', '.iges', '.igs'] as const
+const MODEL_EXTENSIONS = [
+  '.stl',
+  '.obj',
+  '.step',
+  '.stp',
+  '.iges',
+  '.igs',
+  '.gltf',
+  '.glb',
+] as const
 const TEXTURE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'] as const
 const OCCT_EXTENSIONS = ['.step', '.stp', '.iges', '.igs'] as const
+const GLTF_EXTENSIONS = ['.gltf', '.glb'] as const
+const EMPTY_ANIMATIONS: AnimationClip[] = []
 
 const VIEW_DIRECTIONS: Record<ViewPreset, Vector3> = {
   iso: new Vector3(1, 0.85, 1).normalize(),
@@ -364,6 +387,8 @@ function ClippingController({
   solidCapEnabled,
   capColor,
   capsRevision,
+  printLayerEnabled,
+  printLayerHeight,
 }: {
   model: LoadedModel | null
   clipMasterEnabled: boolean
@@ -375,6 +400,8 @@ function ClippingController({
   solidCapEnabled: boolean
   capColor: string
   capsRevision: number
+  printLayerEnabled: boolean
+  printLayerHeight: number
 }) {
   const { gl } = useThree()
   const planes = useMemo(
@@ -382,6 +409,7 @@ function ClippingController({
       x: new Plane(new Vector3(-1, 0, 0), 0),
       y: new Plane(new Vector3(0, -1, 0), 0),
       z: new Plane(new Vector3(0, 0, -1), 0),
+      print: new Plane(new Vector3(0, -1, 0), 0),
     }),
     [],
   )
@@ -410,12 +438,20 @@ function ClippingController({
     updateClipPlane(planes.y, 'y', clipY.value, clipY.inverted)
     updateClipPlane(planes.z, 'z', clipZ.value, clipZ.inverted)
 
+    // Print layer: clip everything above build height (scene Y-up)
+    planes.print.setFromNormalAndCoplanarPoint(
+      new Vector3(0, -1, 0),
+      new Vector3(0, printLayerHeight, 0),
+    )
+
     const activePlanes: Plane[] = []
     if (clipMasterEnabled) {
       if (clipX.enabled) activePlanes.push(planes.x)
       if (clipY.enabled) activePlanes.push(planes.y)
       if (clipZ.enabled) activePlanes.push(planes.z)
     }
+    if (printLayerEnabled) activePlanes.push(planes.print)
+
     applyClippingToObject(model?.root ?? null, activePlanes)
 
     const diag = model
@@ -427,13 +463,27 @@ function ClippingController({
     helpers.x.updateMatrixWorld(true)
     helpers.y.updateMatrixWorld(true)
     helpers.z.updateMatrixWorld(true)
-  }, [clipMasterEnabled, clipX, clipY, clipZ, model, planes, helpers])
+  }, [
+    clipMasterEnabled,
+    clipX,
+    clipY,
+    clipZ,
+    model,
+    planes,
+    helpers,
+    printLayerEnabled,
+    printLayerHeight,
+  ])
 
   // Rebuild stencil groups + cap meshes only when structure/color changes
   useEffect(() => {
     updateClipPlane(planes.x, 'x', clipX.value, clipX.inverted)
     updateClipPlane(planes.y, 'y', clipY.value, clipY.inverted)
     updateClipPlane(planes.z, 'z', clipZ.value, clipZ.inverted)
+    planes.print.setFromNormalAndCoplanarPoint(
+      new Vector3(0, -1, 0),
+      new Vector3(0, printLayerHeight, 0),
+    )
 
     const activePlanes: Plane[] = []
     const activeAxes: Axis[] = []
@@ -451,6 +501,7 @@ function ClippingController({
         activeAxes.push('z')
       }
     }
+    if (printLayerEnabled) activePlanes.push(planes.print)
 
     if (model?.root) clearClipStencilChildren(model.root)
 
@@ -534,6 +585,8 @@ function ClippingController({
     planes,
     solidCapEnabled,
     capsRevision,
+    printLayerEnabled,
+    // printLayerHeight: only plane constant changes — handled in sync effect
     // capColor updates via dedicated effect — avoid full stencil rebuild
   ])
 
@@ -668,11 +721,14 @@ function computeStats(root: Object3D): ModelStats {
 /**
  * CAD files are often Z-up. Three.js is Y-up — apply -90° on X,
  * then seat the model on the grid plane.
+ * glTF is already Y-up — skip the CAD rotation.
  */
-function wrapLoadedObject(object: Object3D): Group {
+function wrapLoadedObject(object: Object3D, options?: { cadZUp?: boolean }): Group {
   const content = new Group()
   content.add(object)
-  content.rotation.x = -Math.PI / 2
+  if (options?.cadZUp !== false) {
+    content.rotation.x = -Math.PI / 2
+  }
 
   const root = new Group()
   root.add(content)
@@ -693,22 +749,38 @@ function createObjContent(text: string): Object3D {
   return group
 }
 
+async function createGltfContent(
+  file: File,
+): Promise<{ scene: Object3D; animations: AnimationClip[] }> {
+  const buffer = await file.arrayBuffer()
+  const loader = new GLTFLoader()
+  const gltf = await loader.parseAsync(buffer, '')
+  return { scene: gltf.scene, animations: gltf.animations ?? [] }
+}
+
 async function loadModelFromFile(file: File): Promise<LoadedModel> {
   const ext = getExtension(file.name)
   let content: Object3D
+  let animations: AnimationClip[] = []
+  let cadZUp = true
 
   if (ext === '.stl') {
     content = createStlContent(await file.arrayBuffer())
   } else if (ext === '.obj') {
     content = createObjContent(await file.text())
+  } else if ((GLTF_EXTENSIONS as readonly string[]).includes(ext)) {
+    const gltf = await createGltfContent(file)
+    content = gltf.scene
+    animations = gltf.animations
+    cadZUp = false
   } else if ((OCCT_EXTENSIONS as readonly string[]).includes(ext)) {
     content = await loadOcctContent(file)
   } else {
     throw new Error(`Desteklenmeyen dosya türü: ${ext || 'bilinmiyor'}`)
   }
 
-  const root = wrapLoadedObject(content)
-  return { root, name: file.name, stats: computeStats(root) }
+  const root = wrapLoadedObject(content, { cadZUp })
+  return { root, name: file.name, stats: computeStats(root), animations }
 }
 
 function disposeObject(root: Object3D) {
@@ -904,6 +976,86 @@ function applyViewMode(root: Object3D, mode: ViewMode) {
   })
 }
 
+function createOverhangMaterial(): ShaderMaterial {
+  return new ShaderMaterial({
+    uniforms: {
+      uThreshold: { value: OVERHANG_DOT_THRESHOLD },
+      uSafeColor: { value: new Color('#6e7a72') },
+      uOverhangColor: { value: new Color('#ff0000') },
+      uUp: { value: new Vector3(0, 1, 0) },
+    },
+    vertexShader: /* glsl */ `
+      varying vec3 vWorldNormal;
+      #include <clipping_planes_pars_vertex>
+      void main() {
+        vWorldNormal = normalize(mat3(modelMatrix) * normal);
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <clipping_planes_vertex>
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uThreshold;
+      uniform vec3 uSafeColor;
+      uniform vec3 uOverhangColor;
+      uniform vec3 uUp;
+      varying vec3 vWorldNormal;
+      #include <clipping_planes_pars_fragment>
+      void main() {
+        #include <clipping_planes_fragment>
+        float d = dot(normalize(vWorldNormal), normalize(uUp));
+        vec3 col = d < uThreshold ? uOverhangColor : uSafeColor;
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+    clipping: true,
+    lights: false,
+    toneMapped: false,
+  })
+}
+
+function applyPrintOverhangAnalysis(root: Object3D) {
+  for (const mesh of collectRenderableMeshes(root)) {
+    if (mesh.userData[PRINT_MAT_BACKUP_KEY] == null) {
+      mesh.userData[PRINT_MAT_BACKUP_KEY] = mesh.material
+    }
+    const prev = mesh.material
+    const clippingPlanes = Array.isArray(prev)
+      ? (prev[0]?.clippingPlanes ?? [])
+      : ((prev as Material | undefined)?.clippingPlanes ?? [])
+    const mat = createOverhangMaterial()
+    mat.clippingPlanes = clippingPlanes
+    mat.clipShadows = clippingPlanes.length > 0
+    mesh.material = mat
+    mesh.renderOrder = clippingPlanes.length > 0 ? 6 : 0
+  }
+}
+
+function clearPrintOverhangAnalysis(
+  root: Object3D,
+  viewMode: ViewMode,
+  modelColor: string,
+) {
+  for (const mesh of collectRenderableMeshes(root)) {
+    const backup = mesh.userData[PRINT_MAT_BACKUP_KEY] as
+      | Material
+      | Material[]
+      | undefined
+    if (backup == null) continue
+
+    const current = mesh.material
+    const currents = Array.isArray(current) ? current : [current]
+    currents.forEach((mat) => {
+      if (mat instanceof ShaderMaterial) mat.dispose()
+    })
+
+    mesh.material = backup
+    delete mesh.userData[PRINT_MAT_BACKUP_KEY]
+  }
+  applyModelColor(root, modelColor)
+  applyViewMode(root, viewMode)
+}
+
 function rotateModelAxis(model: LoadedModel, axis: Axis): LoadedModel {
   const content = model.root.children[0]
   if (!content) return model
@@ -920,6 +1072,105 @@ function rotateModelAxis(model: LoadedModel, axis: Axis): LoadedModel {
     ...model,
     stats: computeStats(model.root),
   }
+}
+
+function formatAnimTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00.0'
+  const m = Math.floor(seconds / 60)
+  const s = seconds - m * 60
+  return `${m}:${s.toFixed(1).padStart(4, '0')}`
+}
+
+function AnimationController({
+  root,
+  clips,
+  playing,
+  loop,
+  speed,
+  seekRequestId,
+  seekTime,
+  onTimeUpdate,
+  onDurationChange,
+}: {
+  root: Object3D | null
+  clips: AnimationClip[]
+  playing: boolean
+  loop: boolean
+  speed: number
+  seekRequestId: number
+  seekTime: number
+  onTimeUpdate: (time: number) => void
+  onDurationChange: (duration: number) => void
+}) {
+  const mixerRef = useRef<AnimationMixer | null>(null)
+  const actionsRef = useRef<AnimationAction[]>([])
+  const playingRef = useRef(playing)
+  const onTimeUpdateRef = useRef(onTimeUpdate)
+  playingRef.current = playing
+  onTimeUpdateRef.current = onTimeUpdate
+
+  useEffect(() => {
+    mixerRef.current?.stopAllAction()
+    mixerRef.current = null
+    actionsRef.current = []
+
+    if (!root || clips.length === 0) {
+      onDurationChange(0)
+      return
+    }
+
+    const mixer = new AnimationMixer(root)
+    const actions = clips.map((clip) => {
+      const action = mixer.clipAction(clip)
+      action.enabled = true
+      action.setEffectiveWeight(1)
+      action.play()
+      action.paused = !playingRef.current
+      return action
+    })
+
+    mixerRef.current = mixer
+    actionsRef.current = actions
+    const duration = Math.max(...clips.map((c) => c.duration), 0)
+    onDurationChange(duration)
+
+    return () => {
+      mixer.stopAllAction()
+      mixer.uncacheRoot(root)
+      mixerRef.current = null
+      actionsRef.current = []
+    }
+  }, [root, clips, onDurationChange])
+
+  useEffect(() => {
+    const mixer = mixerRef.current
+    if (!mixer) return
+    actionsRef.current.forEach((action) => {
+      action.paused = !playing
+      action.setLoop(loop ? LoopRepeat : LoopOnce, loop ? Infinity : 1)
+      if (!loop) action.clampWhenFinished = true
+    })
+    mixer.timeScale = speed
+  }, [playing, loop, speed])
+
+  useEffect(() => {
+    if (seekRequestId === 0) return
+    const mixer = mixerRef.current
+    if (!mixer) return
+    mixer.setTime(Math.max(0, seekTime))
+    onTimeUpdateRef.current(mixer.time)
+  }, [seekRequestId, seekTime])
+
+  useFrame((_, delta) => {
+    const mixer = mixerRef.current
+    if (!mixer || clips.length === 0) return
+    if (playingRef.current) {
+      mixer.update(delta)
+      onTimeUpdateRef.current(mixer.time)
+    }
+  })
+
+  return null
 }
 
 function easeInOutCubic(t: number): number {
@@ -1494,6 +1745,15 @@ function Scene({
   renderTransparent,
   onRenderComplete,
   onRenderError,
+  printAnalysisActive,
+  printLayerHeight,
+  animPlaying,
+  animLoop,
+  animSpeed,
+  animSeekRequestId,
+  animSeekTime,
+  onAnimTimeUpdate,
+  onAnimDurationChange,
 }: {
   model: LoadedModel | null
   showHelpers: boolean
@@ -1525,6 +1785,15 @@ function Scene({
   renderTransparent: boolean
   onRenderComplete: () => void
   onRenderError: (message: string) => void
+  printAnalysisActive: boolean
+  printLayerHeight: number
+  animPlaying: boolean
+  animLoop: boolean
+  animSpeed: number
+  animSeekRequestId: number
+  animSeekTime: number
+  onAnimTimeUpdate: (time: number) => void
+  onAnimDurationChange: (duration: number) => void
 }) {
   const gridSize = useMemo(() => {
     if (!model) return 40
@@ -1572,6 +1841,8 @@ function Scene({
         solidCapEnabled={solidCapEnabled}
         capColor={capColor}
         capsRevision={capsRevision}
+        printLayerEnabled={printAnalysisActive}
+        printLayerHeight={printLayerHeight}
       />
 
       <MeasureClickHandler
@@ -1607,6 +1878,17 @@ function Scene({
         transparent={renderTransparent}
         onComplete={onRenderComplete}
         onError={onRenderError}
+      />
+      <AnimationController
+        root={model?.root ?? null}
+        clips={model?.animations ?? EMPTY_ANIMATIONS}
+        playing={animPlaying}
+        loop={animLoop}
+        speed={animSpeed}
+        seekRequestId={animSeekRequestId}
+        seekTime={animSeekTime}
+        onTimeUpdate={onAnimTimeUpdate}
+        onDurationChange={onAnimDurationChange}
       />
     </>
   )
@@ -1695,9 +1977,20 @@ export default function CADViewer() {
   const [renderRequestId, setRenderRequestId] = useState(0)
   const [isCapturing, setIsCapturing] = useState(false)
   const [renderTransparent, setRenderTransparent] = useState(false)
+  const [printAnalysisActive, setPrintAnalysisActive] = useState(false)
+  const [printLayerHeight, setPrintLayerHeight] = useState(0)
+  const [animPlaying, setAnimPlaying] = useState(false)
+  const [animLoop, setAnimLoop] = useState(true)
+  const [animSpeed, setAnimSpeed] = useState(1)
+  const [animTime, setAnimTime] = useState(0)
+  const [animDuration, setAnimDuration] = useState(0)
+  const [animSeekRequestId, setAnimSeekRequestId] = useState(0)
+  const [animSeekTime, setAnimSeekTime] = useState(0)
+  const [animScrubbing, setAnimScrubbing] = useState(false)
   const orientationRef = useRef(new Quaternion())
   const viewDirRef = useRef(new Vector3(1, 1, 1).normalize())
   const dragDepth = useRef(0)
+  const animTimeRef = useRef(0)
   const modelColorRef = useRef(modelColor)
   const pendingPointRef = useRef<[number, number, number] | null>(null)
 
@@ -1848,6 +2141,14 @@ export default function CADViewer() {
         setClipY({ enabled: false, value: bounds.max.y, inverted: false })
         setClipZ({ enabled: false, value: bounds.max.z, inverted: false })
         setClipMasterEnabled(false)
+        setPrintAnalysisActive(false)
+        setPrintLayerHeight(bounds.max.y)
+        setAnimPlaying(false)
+        setAnimTime(0)
+        setAnimDuration(0)
+        setAnimSeekTime(0)
+        setAnimSeekRequestId(0)
+        animTimeRef.current = 0
         const parts = buildAssemblyParts(loaded.root)
         setAssemblyParts(parts)
         setSelectedPartId(null)
@@ -1858,7 +2159,11 @@ export default function CADViewer() {
           if (prev) disposeObject(prev.root)
           return loaded
         })
-        setStatus(file.name)
+        setStatus(
+          loaded.animations.length > 0
+            ? `${file.name} · ${loaded.animations.length} animasyon`
+            : file.name,
+        )
         setViewPreset('iso')
         setCameraRequestId((id) => id + 1)
       } catch (err) {
@@ -1885,7 +2190,7 @@ export default function CADViewer() {
       }
 
       setError(
-        'Desteklenen dosyalar: .stl, .obj, .step, .stp, .iges, .igs veya .jpg / .jpeg / .png / .webp',
+        'Desteklenen dosyalar: .stl, .obj, .gltf, .glb, .step, .stp, .iges, .igs veya .jpg / .jpeg / .png / .webp',
       )
     },
     [handleModelFile, handleTextureFile],
@@ -1915,7 +2220,7 @@ export default function CADViewer() {
   const onModelColorChange = (event: ChangeEvent<HTMLInputElement>) => {
     const color = event.target.value
     setModelColor(color)
-    if (model) applyModelColor(model.root, color)
+    if (model && !printAnalysisActive) applyModelColor(model.root, color)
   }
 
   const onMeasureHit = useCallback((point: Vector3) => {
@@ -2052,16 +2357,67 @@ export default function CADViewer() {
 
   const onViewModeChange = (mode: ViewMode) => {
     setViewMode(mode)
-    if (model) applyViewMode(model.root, mode)
+    if (!model) return
+    if (printAnalysisActive) return
+    applyViewMode(model.root, mode)
   }
 
   const onRotate = (axis: Axis) => {
     if (!model) return
     const next = rotateModelAxis(model, axis)
-    applyViewMode(next.root, viewMode)
+    if (printAnalysisActive) {
+      applyPrintOverhangAnalysis(next.root)
+    } else {
+      applyViewMode(next.root, viewMode)
+    }
+    const bounds = getObjectClipBounds(next.root)
+    setPrintLayerHeight((h) => Math.min(bounds.max.y, Math.max(bounds.min.y, h)))
     setModel({ ...next })
     requestCameraView(viewPreset)
   }
+
+  const onAnimTimeUpdate = useCallback((time: number) => {
+    animTimeRef.current = time
+    if (animScrubbing) return
+    setAnimTime((prev) => (Math.abs(prev - time) >= 0.04 ? time : prev))
+  }, [animScrubbing])
+
+  const onAnimDurationChange = useCallback((duration: number) => {
+    setAnimDuration(duration)
+    setAnimTime(0)
+    animTimeRef.current = 0
+  }, [])
+
+  const seekAnimation = useCallback((time: number) => {
+    const clamped = Math.max(0, Math.min(time, animDuration || time))
+    setAnimSeekTime(clamped)
+    setAnimTime(clamped)
+    animTimeRef.current = clamped
+    setAnimSeekRequestId((id) => id + 1)
+  }, [animDuration])
+
+  const restartAnimation = useCallback(() => {
+    seekAnimation(0)
+    setAnimPlaying(true)
+  }, [seekAnimation])
+
+  const togglePrintAnalysis = useCallback(() => {
+    const root = modelRef.current?.root
+    if (!root) return
+
+    setPrintAnalysisActive((active) => {
+      if (active) {
+        clearPrintOverhangAnalysis(root, viewMode, modelColorRef.current)
+        setStatus('Baskı analizi kapatıldı')
+        return false
+      }
+      const bounds = getObjectClipBounds(root)
+      setPrintLayerHeight(bounds.max.y)
+      applyPrintOverhangAnalysis(root)
+      setStatus(`Baskı analizi: destek gereken yüzeyler kırmızı (>${OVERHANG_ANGLE_DEG}°)`)
+      return true
+    })
+  }, [viewMode])
 
   const onModelInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -2105,6 +2461,11 @@ export default function CADViewer() {
   const canUploadTexture = textureTarget === 'ground' || !!model
   const hasActiveTexture =
     textureTarget === 'ground' ? !!groundTextureName : !!modelTextureName
+  const hasAnimations = !!model && model.animations.length > 0 && animDuration > 0
+  const animDisplayTime =
+    animDuration > 0
+      ? ((animTime % animDuration) + animDuration) % animDuration
+      : 0
 
   return (
     <div
@@ -2162,6 +2523,15 @@ export default function CADViewer() {
           renderTransparent={renderTransparent}
           onRenderComplete={onRenderComplete}
           onRenderError={onRenderError}
+          printAnalysisActive={printAnalysisActive}
+          printLayerHeight={printLayerHeight}
+          animPlaying={animPlaying}
+          animLoop={animLoop}
+          animSpeed={animSpeed}
+          animSeekRequestId={animSeekRequestId}
+          animSeekTime={animSeekTime}
+          onAnimTimeUpdate={onAnimTimeUpdate}
+          onAnimDurationChange={onAnimDurationChange}
         />
       </Canvas>
 
@@ -2195,7 +2565,7 @@ export default function CADViewer() {
           <input
             ref={modelInputRef}
             type="file"
-            accept=".stl,.obj,.step,.stp,.iges,.igs,model/stl,model/obj,application/sla,model/step,application/step"
+            accept=".stl,.obj,.gltf,.glb,.step,.stp,.iges,.igs,model/stl,model/obj,model/gltf-binary,model/gltf+json,application/sla,model/step,application/step"
             className="file-input"
             onChange={onModelInputChange}
           />
@@ -2365,6 +2735,19 @@ export default function CADViewer() {
         <div className="tb-divider" />
 
         <div className="tb-group">
+          <span className="tb-label">Baskı</span>
+          <ToolbarButton
+            label="Baskı Analizi"
+            active={printAnalysisActive}
+            onClick={togglePrintAnalysis}
+            disabled={!model}
+            title="Ters açı / destek analizi ve katman dilimleme"
+          />
+        </div>
+
+        <div className="tb-divider" />
+
+        <div className="tb-group">
           <span className="tb-label">Sahne</span>
           <ToolbarButton
             label={showHelpers ? 'Grid Açık' : 'Grid Kapalı'}
@@ -2406,6 +2789,88 @@ export default function CADViewer() {
           </div>
         )}
       </header>
+
+      {printAnalysisActive && model && (
+        <aside className="print-layer-panel" aria-label="Katman yüksekliği">
+          <div className="print-layer-header">
+            <strong>Katman</strong>
+            <span>{printLayerHeight.toFixed(2)}</span>
+          </div>
+          <input
+            className="print-layer-slider"
+            type="range"
+            min={clipBounds.min.y}
+            max={clipBounds.max.y}
+            step={Math.max((clipBounds.max.y - clipBounds.min.y) / 500, 0.001)}
+            value={printLayerHeight}
+            onChange={(e) => setPrintLayerHeight(Number(e.target.value))}
+            aria-label="Katman yüksekliği"
+            title="Katman yüksekliği (build Y)"
+          />
+          <div className="print-layer-legend">
+            <span className="lg-safe">Güvenli</span>
+            <span className="lg-overhang">Destek</span>
+          </div>
+        </aside>
+      )}
+
+      {hasAnimations && (
+        <div className="anim-timeline" role="region" aria-label="Animasyon oynatıcı">
+          <button
+            type="button"
+            className="anim-btn"
+            onClick={() => setAnimPlaying((p) => !p)}
+            title={animPlaying ? 'Duraklat' : 'Oynat'}
+          >
+            {animPlaying ? '⏸' : '▶'}
+          </button>
+          <button
+            type="button"
+            className="anim-btn"
+            onClick={restartAnimation}
+            title="Başa sar"
+          >
+            ⏮
+          </button>
+          <button
+            type="button"
+            className={`anim-btn${animLoop ? ' is-active' : ''}`}
+            onClick={() => setAnimLoop((v) => !v)}
+            title="Döngü"
+          >
+            🔁
+          </button>
+
+          <div className="anim-scrub">
+            <span className="anim-time">{formatAnimTime(animDisplayTime)}</span>
+            <input
+              type="range"
+              min={0}
+              max={animDuration || 1}
+              step={0.01}
+              value={animDisplayTime}
+              onPointerDown={() => setAnimScrubbing(true)}
+              onPointerUp={() => setAnimScrubbing(false)}
+              onChange={(e) => seekAnimation(Number(e.target.value))}
+              aria-label="Animasyon zaman çubuğu"
+            />
+            <span className="anim-time">{formatAnimTime(animDuration)}</span>
+          </div>
+
+          <div className="anim-speed" role="group" aria-label="Oynatma hızı">
+            {([0.5, 1, 2] as const).map((rate) => (
+              <button
+                key={rate}
+                type="button"
+                className={`anim-speed-btn${animSpeed === rate ? ' is-active' : ''}`}
+                onClick={() => setAnimSpeed(rate)}
+              >
+                {rate}×
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {treePanelOpen && model && (
         <aside className="assembly-panel">
@@ -2617,7 +3082,7 @@ export default function CADViewer() {
             <span className="drop-hint">
               {textureTarget === 'ground'
                 ? 'Kaplama → Zemin (.jpg / .png)'
-                : 'STL / OBJ / STEP / IGES veya Model kaplaması'}
+                : 'STL / OBJ / GLTF / GLB / STEP / IGES veya Model kaplaması'}
             </span>
           </div>
         </div>
@@ -2625,8 +3090,8 @@ export default function CADViewer() {
 
       {!isDragging && (
         <p className="empty-hint">
-          STL / OBJ / STEP / IGES modellerinizi veya kaplamak istediğiniz Görsel (JPG/PNG)
-          dosyalarını buraya sürükleyin. Kaplama hedefi:{' '}
+          STL / OBJ / GLTF / GLB / STEP / IGES modellerinizi veya kaplamak istediğiniz Görsel
+          (JPG/PNG) dosyalarını buraya sürükleyin. Kaplama hedefi:{' '}
           {textureTarget === 'ground' ? 'Zemin' : 'Model'}.
         </p>
       )}

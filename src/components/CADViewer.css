@@ -150,10 +150,254 @@
 .cad-viewer.is-capturing .model-info,
 .cad-viewer.is-capturing .empty-hint,
 .cad-viewer.is-capturing .drop-overlay,
-.cad-viewer.is-capturing .measure-label {
+.cad-viewer.is-capturing .measure-label,
+.cad-viewer.is-capturing .print-layer-panel,
+.cad-viewer.is-capturing .anim-timeline {
   visibility: hidden !important;
   opacity: 0 !important;
   pointer-events: none !important;
+}
+
+/* —— Print analysis layer slider —— */
+.print-layer-panel {
+  position: absolute;
+  top: 50%;
+  right: 20px;
+  transform: translateY(-50%);
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 10px;
+  width: 72px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(16, 16, 18, 0.72);
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+  animation: clip-panel-in 0.18s ease-out;
+}
+
+.print-layer-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(230, 230, 230, 0.55);
+}
+
+.print-layer-header strong {
+  color: #f0f0f0;
+  font-size: 11px;
+}
+
+.print-layer-header span {
+  font-variant-numeric: tabular-nums;
+  color: #9fd0ff;
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.print-layer-slider {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  appearance: none;
+  width: 18px;
+  height: 220px;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.print-layer-slider::-webkit-slider-runnable-track {
+  width: 6px;
+  border-radius: 999px;
+  background: linear-gradient(to top, #ff3b3b 0%, #6e7a72 55%, #8fd4a0 100%);
+}
+
+.print-layer-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-left: -5px;
+  border-radius: 50%;
+  border: 2px solid #0e1014;
+  background: #e8eef5;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.print-layer-slider::-moz-range-track {
+  width: 6px;
+  border-radius: 999px;
+  background: linear-gradient(to top, #ff3b3b 0%, #6e7a72 55%, #8fd4a0 100%);
+}
+
+.print-layer-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #0e1014;
+  background: #e8eef5;
+}
+
+.print-layer-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.print-layer-legend .lg-safe {
+  color: #8fd4a0;
+}
+
+.print-layer-legend .lg-overhang {
+  color: #ff6b6b;
+}
+
+/* —— Animation timeline —— */
+.anim-timeline {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(720px, calc(100% - 32px));
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(14, 16, 20, 0.72);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  animation: clip-panel-in 0.18s ease-out;
+}
+
+.anim-btn {
+  appearance: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: #f2f2f2;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.anim-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.anim-btn.is-active {
+  background: rgba(90, 140, 220, 0.3);
+  border-color: rgba(160, 200, 255, 0.45);
+}
+
+.anim-scrub {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.anim-time {
+  font: 600 11px/1 'Segoe UI', system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  color: rgba(220, 220, 220, 0.7);
+  width: 42px;
+  flex-shrink: 0;
+}
+
+.anim-time:last-child {
+  text-align: right;
+}
+
+.anim-scrub input[type='range'] {
+  flex: 1;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  outline: none;
+  cursor: pointer;
+}
+
+.anim-scrub input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #9fd0ff;
+  border: 2px solid #0e1014;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.anim-scrub input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #9fd0ff;
+  border: 2px solid #0e1014;
+}
+
+.anim-speed {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.anim-speed-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d8d8d8;
+  font: 600 11px/1 'Segoe UI', system-ui, sans-serif;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.anim-speed-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.anim-speed-btn.is-active {
+  background: rgba(90, 140, 220, 0.3);
+  border-color: rgba(160, 200, 255, 0.45);
+  color: #fff;
+}
+
+@media (max-width: 900px) {
+  .anim-timeline {
+    bottom: 12px;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+
+  .anim-time {
+    width: 36px;
+    font-size: 10px;
+  }
 }
 
 .cad-viewer.is-measuring,
