@@ -102,6 +102,61 @@ const CLIP_HELPER_COLORS = {
   z: 0x5599ff,
 } as const
 
+type AssemblyPart = {
+  id: string
+  name: string
+  visible: boolean
+}
+
+function buildAssemblyParts(root: Object3D): AssemblyPart[] {
+  const parts: AssemblyPart[] = []
+  let index = 0
+
+  root.traverse((child) => {
+    if (!(child as Mesh).isMesh) return
+    if (child.name === 'selection-highlight') return
+
+    index += 1
+    const mesh = child as Mesh
+    const raw = mesh.name?.trim()
+    const name = raw && raw !== 'cad-edges' ? raw : `Parça ${index}`
+
+    parts.push({
+      id: mesh.uuid,
+      name,
+      visible: mesh.visible,
+    })
+  })
+
+  return parts
+}
+
+function findMeshById(root: Object3D, id: string): Mesh | null {
+  let found: Mesh | null = null
+  root.traverse((child) => {
+    if ((child as Mesh).isMesh && child.uuid === id) {
+      found = child as Mesh
+    }
+  })
+  return found
+}
+
+function isolateMesh(root: Object3D, id: string) {
+  root.traverse((child) => {
+    if ((child as Mesh).isMesh && child.name !== 'selection-highlight') {
+      child.visible = child.uuid === id
+    }
+  })
+}
+
+function showAllMeshes(root: Object3D) {
+  root.traverse((child) => {
+    if ((child as Mesh).isMesh && child.name !== 'selection-highlight') {
+      child.visible = true
+    }
+  })
+}
+
 const MODEL_EXTENSIONS = ['.stl', '.obj', '.step', '.stp', '.iges', '.igs'] as const
 const TEXTURE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'] as const
 const OCCT_EXTENSIONS = ['.step', '.stp', '.iges', '.igs'] as const
@@ -618,10 +673,14 @@ function CameraDirector({
   target,
   preset,
   requestId,
+  focusObject,
+  focusRequestId,
 }: {
   target: Object3D | null
   preset: ViewPreset
   requestId: number
+  focusObject?: Object3D | null
+  focusRequestId?: number
 }) {
   const camera = useThree((state) => state.camera)
   const controls = useThree((state) => state.controls) as OrbitControlsLike | null
@@ -633,6 +692,36 @@ function CameraDirector({
     fromTarget: Vector3
     toTarget: Vector3
   } | null>(null)
+
+  useEffect(() => {
+    if (!focusObject || !focusRequestId) return
+
+    const box = new Box3().setFromObject(focusObject)
+    if (box.isEmpty()) return
+
+    const center = box.getCenter(new Vector3())
+    const radius = Math.max(box.getBoundingSphere(new Sphere()).radius, 0.01)
+    const fov = 'fov' in camera ? ((camera.fov as number) * Math.PI) / 180 : Math.PI / 4
+    const distance = (radius / Math.sin(fov / 2)) * 1.35
+    let direction = camera.position.clone().sub(center)
+    if (direction.lengthSq() < 1e-6) direction = VIEW_DIRECTIONS.iso.clone()
+    else direction.normalize()
+    const toPos = center.clone().add(direction.multiplyScalar(distance))
+
+    camera.near = Math.max(distance / 100, 0.01)
+    camera.far = Math.max(distance * 50, 100)
+    camera.updateProjectionMatrix()
+
+    anim.current = {
+      t: 0,
+      duration: 0.5,
+      fromPos: camera.position.clone(),
+      toPos,
+      fromTarget: controls?.target.clone() ?? center.clone(),
+      toTarget: center.clone(),
+    }
+    if (controls) controls.enabled = false
+  }, [focusObject, focusRequestId, camera, controls])
 
   useEffect(() => {
     if (!target || requestId === 0) return
@@ -811,6 +900,87 @@ function MeasureClickHandler({
   return null
 }
 
+function PartPickHandler({
+  active,
+  target,
+  onPick,
+}: {
+  active: boolean
+  target: Object3D | null
+  onPick: (meshId: string) => void
+}) {
+  const { camera, gl } = useThree()
+  const raycaster = useMemo(() => new Raycaster(), [])
+  const pointer = useMemo(() => new Vector2(), [])
+  const onPickRef = useRef(onPick)
+  onPickRef.current = onPick
+  const downPos = useRef<{ x: number; y: number } | null>(null)
+
+  useEffect(() => {
+    if (!active || !target) return
+
+    const element = gl.domElement
+
+    const onPointerDown = (event: PointerEvent) => {
+      downPos.current = { x: event.clientX, y: event.clientY }
+    }
+
+    const onClick = (event: MouseEvent) => {
+      if (downPos.current) {
+        const dx = event.clientX - downPos.current.x
+        const dy = event.clientY - downPos.current.y
+        if (dx * dx + dy * dy > 36) return
+      }
+
+      const rect = element.getBoundingClientRect()
+      pointer.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      )
+      raycaster.setFromCamera(pointer, camera)
+      const hits = raycaster.intersectObjects(collectModelMeshes(target), false)
+      const hit = hits.find((h) => h.object.visible && (h.object as Mesh).isMesh)
+      if (hit) onPickRef.current(hit.object.uuid)
+    }
+
+    element.addEventListener('pointerdown', onPointerDown)
+    element.addEventListener('click', onClick)
+    return () => {
+      element.removeEventListener('pointerdown', onPointerDown)
+      element.removeEventListener('click', onClick)
+    }
+  }, [active, target, camera, gl, pointer, raycaster])
+
+  return null
+}
+
+function SelectionHighlight({ mesh }: { mesh: Mesh | null }) {
+  useEffect(() => {
+    if (!mesh) return
+
+    const edges = new EdgesGeometry(mesh.geometry, 25)
+    const material = new LineBasicMaterial({
+      color: '#4da3ff',
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+    })
+    const lines = new LineSegments(edges, material)
+    lines.name = 'selection-highlight'
+    lines.renderOrder = 10
+    mesh.add(lines)
+
+    return () => {
+      mesh.remove(lines)
+      edges.dispose()
+      material.dispose()
+    }
+  }, [mesh])
+
+  return null
+}
+
+
 function MeasurementMarkers({
   measurements,
   pending,
@@ -872,6 +1042,10 @@ function Scene({
   clipZ,
   clipDraggingAxis,
   showClipHelpers,
+  selectedPartId,
+  onPartPick,
+  focusObject,
+  focusRequestId,
 }: {
   model: LoadedModel | null
   showHelpers: boolean
@@ -888,6 +1062,10 @@ function Scene({
   clipZ: ClipAxisState
   clipDraggingAxis: Axis | null
   showClipHelpers: boolean
+  selectedPartId: string | null
+  onPartPick: (meshId: string) => void
+  focusObject: Object3D | null
+  focusRequestId: number
 }) {
   const gridSize = useMemo(() => {
     if (!model) return 40
@@ -900,6 +1078,11 @@ function Scene({
     const diag = Math.hypot(model.stats.size.x, model.stats.size.y, model.stats.size.z)
     return Math.max(diag * 0.008, 0.15)
   }, [model])
+
+  const selectedMesh = useMemo(() => {
+    if (!model || !selectedPartId) return null
+    return findMeshById(model.root, selectedPartId)
+  }, [model, selectedPartId])
 
   return (
     <>
@@ -931,6 +1114,12 @@ function Scene({
         target={model?.root ?? null}
         onHit={onMeasureHit}
       />
+      <PartPickHandler
+        active={!measureMode && !!model}
+        target={model?.root ?? null}
+        onPick={onPartPick}
+      />
+      <SelectionHighlight mesh={selectedMesh} />
       <MeasurementMarkers
         measurements={measurements}
         pending={pendingPoint}
@@ -941,6 +1130,8 @@ function Scene({
         target={model?.root ?? null}
         preset={viewPreset}
         requestId={cameraRequestId}
+        focusObject={focusObject}
+        focusRequestId={focusRequestId}
       />
       <OrbitControls makeDefault />
     </>
@@ -1016,6 +1207,12 @@ export default function CADViewer() {
   const [clipZ, setClipZ] = useState<ClipAxisState>(DEFAULT_CLIP_AXIS)
   const [clipDraggingAxis, setClipDraggingAxis] = useState<Axis | null>(null)
   const [showClipHelpers, setShowClipHelpers] = useState(false)
+  const [treePanelOpen, setTreePanelOpen] = useState(false)
+  const [assemblyParts, setAssemblyParts] = useState<AssemblyPart[]>([])
+  const [selectedPartId, setSelectedPartId] = useState<string | null>(null)
+  const [isolatedPartId, setIsolatedPartId] = useState<string | null>(null)
+  const [focusObject, setFocusObject] = useState<Object3D | null>(null)
+  const [focusRequestId, setFocusRequestId] = useState(0)
   const dragDepth = useRef(0)
   const modelColorRef = useRef(modelColor)
   const pendingPointRef = useRef<[number, number, number] | null>(null)
@@ -1145,6 +1342,12 @@ export default function CADViewer() {
         setClipY({ enabled: false, value: bounds.max.y, inverted: false })
         setClipZ({ enabled: false, value: bounds.max.z, inverted: false })
         setClipMasterEnabled(false)
+        const parts = buildAssemblyParts(loaded.root)
+        setAssemblyParts(parts)
+        setSelectedPartId(null)
+        setIsolatedPartId(null)
+        setFocusObject(null)
+        setTreePanelOpen(parts.length > 0)
         setModel((prev) => {
           if (prev) disposeObject(prev.root)
           return loaded
@@ -1274,6 +1477,70 @@ export default function CADViewer() {
     if (axis === 'z') setClipZ((s) => ({ ...s, inverted: !s.inverted }))
   }
 
+  const syncAssemblyVisibility = useCallback((root: Object3D) => {
+    setAssemblyParts(buildAssemblyParts(root))
+  }, [])
+
+  const onPartPick = useCallback(
+    (meshId: string) => {
+      setSelectedPartId(meshId)
+      setTreePanelOpen(true)
+      const mesh = modelRef.current ? findMeshById(modelRef.current.root, meshId) : null
+      if (mesh) {
+        setFocusObject(mesh)
+        setFocusRequestId((id) => id + 1)
+        setStatus(`Seçili: ${mesh.name || meshId.slice(0, 8)}`)
+      }
+    },
+    [],
+  )
+
+  const focusPart = useCallback((partId: string) => {
+    const root = modelRef.current?.root
+    if (!root) return
+    const mesh = findMeshById(root, partId)
+    if (!mesh) return
+    setSelectedPartId(partId)
+    setFocusObject(mesh)
+    setFocusRequestId((id) => id + 1)
+  }, [])
+
+  const togglePartVisibility = useCallback((partId: string) => {
+    const root = modelRef.current?.root
+    if (!root) return
+    const mesh = findMeshById(root, partId)
+    if (!mesh) return
+    mesh.visible = !mesh.visible
+    if (isolatedPartId === partId && !mesh.visible) {
+      setIsolatedPartId(null)
+    }
+    syncAssemblyVisibility(root)
+  }, [isolatedPartId, syncAssemblyVisibility])
+
+  const isolatePart = useCallback((partId: string) => {
+    const root = modelRef.current?.root
+    if (!root) return
+    isolateMesh(root, partId)
+    setIsolatedPartId(partId)
+    setSelectedPartId(partId)
+    syncAssemblyVisibility(root)
+    const mesh = findMeshById(root, partId)
+    if (mesh) {
+      setFocusObject(mesh)
+      setFocusRequestId((id) => id + 1)
+    }
+    setStatus('Parça izole edildi')
+  }, [syncAssemblyVisibility])
+
+  const showAllParts = useCallback(() => {
+    const root = modelRef.current?.root
+    if (!root) return
+    showAllMeshes(root)
+    setIsolatedPartId(null)
+    syncAssemblyVisibility(root)
+    setStatus('Tüm parçalar gösteriliyor')
+  }, [syncAssemblyVisibility])
+
   const onViewModeChange = (mode: ViewMode) => {
     setViewMode(mode)
     if (model) applyViewMode(model.root, mode)
@@ -1363,6 +1630,10 @@ export default function CADViewer() {
           clipZ={clipZ}
           clipDraggingAxis={clipDraggingAxis}
           showClipHelpers={showClipHelpers}
+          selectedPartId={selectedPartId}
+          onPartPick={onPartPick}
+          focusObject={focusObject}
+          focusRequestId={focusRequestId}
         />
       </Canvas>
 
@@ -1451,6 +1722,19 @@ export default function CADViewer() {
             onClick={() => setClipPanelOpen((v) => !v)}
             disabled={!model}
             title="3D kesit paneli"
+          />
+        </div>
+
+        <div className="tb-divider" />
+
+        <div className="tb-group">
+          <span className="tb-label">Montaj</span>
+          <ToolbarButton
+            label="Montaj Ağacı"
+            active={treePanelOpen}
+            onClick={() => setTreePanelOpen((v) => !v)}
+            disabled={!model}
+            title="Parça listesi / gizle-göster"
           />
         </div>
 
@@ -1567,8 +1851,72 @@ export default function CADViewer() {
         )}
       </header>
 
+      {treePanelOpen && model && (
+        <aside className="assembly-panel">
+          <div className="assembly-panel-header">
+            <div>
+              <strong>Montaj Ağacı</strong>
+              <p>{assemblyParts.length} parça</p>
+            </div>
+            <button
+              type="button"
+              className="tb-btn"
+              onClick={() => setTreePanelOpen(false)}
+              title="Paneli kapat"
+            >
+              Kapat
+            </button>
+          </div>
+
+          {isolatedPartId && (
+            <button type="button" className="tb-btn assembly-show-all" onClick={showAllParts}>
+              Tümünü Göster
+            </button>
+          )}
+
+          <ul className="assembly-list">
+            {assemblyParts.map((part) => (
+              <li
+                key={part.id}
+                className={`assembly-item${selectedPartId === part.id ? ' is-selected' : ''}${
+                  !part.visible ? ' is-hidden' : ''
+                }`}
+              >
+                <button
+                  type="button"
+                  className={`assembly-eye${part.visible ? '' : ' is-off'}`}
+                  title={part.visible ? 'Gizle' : 'Göster'}
+                  onClick={() => togglePartVisibility(part.id)}
+                  aria-label={part.visible ? 'Gizle' : 'Göster'}
+                >
+                  <span className="eye-glyph" />
+                </button>
+                <button
+                  type="button"
+                  className="assembly-name"
+                  title="Parçaya odaklan"
+                  onClick={() => focusPart(part.id)}
+                >
+                  {part.name}
+                </button>
+                <button
+                  type="button"
+                  className={`tb-btn assembly-isolate${
+                    isolatedPartId === part.id ? ' is-active' : ''
+                  }`}
+                  title="İzole et"
+                  onClick={() => isolatePart(part.id)}
+                >
+                  İzole
+                </button>
+              </li>
+            ))}
+          </ul>
+        </aside>
+      )}
+
       {clipPanelOpen && model && (
-        <aside className="clip-panel">
+        <aside className={`clip-panel${treePanelOpen ? ' with-tree' : ''}`}>
           <div className="clip-panel-header">
             <strong>Kesit Kontrolü</strong>
             <button
