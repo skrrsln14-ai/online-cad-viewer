@@ -6,9 +6,10 @@ import {
   useState,
   type ChangeEvent,
   type DragEvent,
+  type MutableRefObject,
 } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { GizmoHelper, GizmoViewcube, Html, Line, OrbitControls } from '@react-three/drei'
+import { Html, Line, OrbitControls } from '@react-three/drei'
 import {
   AlwaysStencilFunc,
   BackSide,
@@ -31,6 +32,7 @@ import {
   Plane,
   PlaneGeometry,
   PlaneHelper,
+  Quaternion,
   Raycaster,
   RepeatWrapping,
   ReplaceStencilOp,
@@ -45,6 +47,7 @@ import {
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { loadOcctContent } from '../lib/loadOcctModel'
+import ViewCube, { CameraOrientationPublisher } from './ViewCube'
 import './CADViewer.css'
 
 type ViewMode = 'solid' | 'wireframe' | 'translucent'
@@ -176,18 +179,6 @@ const VIEW_DIRECTIONS: Record<ViewPreset, Vector3> = {
   front: new Vector3(0, 0.12, 1).normalize(),
   right: new Vector3(1, 0.12, 0).normalize(),
 }
-
-/** Box face order: +X -X +Y -Y +Z -Z */
-const VIEWCUBE_FACES = ['SAĞ', 'SOL', 'ÜST', 'ALT', 'ÖN', 'ARKA'] as const
-
-const VIEWCUBE_STYLE = {
-  color: '#2a3038',
-  hoverColor: '#6eb6ff',
-  textColor: '#f0f3f7',
-  strokeColor: '#0c0e12',
-  opacity: 0.94,
-  font: 'bold 20px "Segoe UI", system-ui, sans-serif',
-} as const
 
 function getExtension(filename: string): string {
   const i = filename.lastIndexOf('.')
@@ -926,12 +917,16 @@ function CameraDirector({
   requestId,
   focusObject,
   focusRequestId,
+  viewDirRef,
+  viewDirRequestId,
 }: {
   target: Object3D | null
   preset: ViewPreset
   requestId: number
   focusObject?: Object3D | null
   focusRequestId?: number
+  viewDirRef?: MutableRefObject<Vector3>
+  viewDirRequestId?: number
 }) {
   const camera = useThree((state) => state.camera)
   const controls = useThree((state) => state.controls) as OrbitControlsLike | null
@@ -943,6 +938,29 @@ function CameraDirector({
     fromTarget: Vector3
     toTarget: Vector3
   } | null>(null)
+
+  const beginOrbitTo = (direction: Vector3, lookTarget: Vector3, distance: number, duration: number) => {
+    const dir = direction.clone().normalize()
+    if (Math.abs(dir.y) > 0.999) {
+      dir.x += 0.0001
+      dir.normalize()
+    }
+    const toPos = lookTarget.clone().add(dir.multiplyScalar(distance))
+
+    camera.near = Math.max(distance / 100, 0.01)
+    camera.far = Math.max(distance * 50, 100)
+    camera.updateProjectionMatrix()
+
+    anim.current = {
+      t: 0,
+      duration,
+      fromPos: camera.position.clone(),
+      toPos,
+      fromTarget: controls?.target.clone() ?? lookTarget.clone(),
+      toTarget: lookTarget.clone(),
+    }
+    if (controls) controls.enabled = false
+  }
 
   useEffect(() => {
     if (!focusObject || !focusRequestId) return
@@ -957,21 +975,8 @@ function CameraDirector({
     let direction = camera.position.clone().sub(center)
     if (direction.lengthSq() < 1e-6) direction = VIEW_DIRECTIONS.iso.clone()
     else direction.normalize()
-    const toPos = center.clone().add(direction.multiplyScalar(distance))
-
-    camera.near = Math.max(distance / 100, 0.01)
-    camera.far = Math.max(distance * 50, 100)
-    camera.updateProjectionMatrix()
-
-    anim.current = {
-      t: 0,
-      duration: 0.5,
-      fromPos: camera.position.clone(),
-      toPos,
-      fromTarget: controls?.target.clone() ?? center.clone(),
-      toTarget: center.clone(),
-    }
-    if (controls) controls.enabled = false
+    beginOrbitTo(direction, center, distance, 0.5)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusObject, focusRequestId, camera, controls])
 
   useEffect(() => {
@@ -984,23 +989,37 @@ function CameraDirector({
     const radius = Math.max(box.getBoundingSphere(new Sphere()).radius, 0.01)
     const fov = 'fov' in camera ? ((camera.fov as number) * Math.PI) / 180 : Math.PI / 4
     const distance = (radius / Math.sin(fov / 2)) * 1.2
-    const toPos = center.clone().add(VIEW_DIRECTIONS[preset].clone().multiplyScalar(distance))
+    beginOrbitTo(VIEW_DIRECTIONS[preset], center, distance, 0.55)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, preset, requestId, camera, controls])
 
-    camera.near = Math.max(distance / 100, 0.01)
-    camera.far = Math.max(distance * 50, 100)
-    camera.updateProjectionMatrix()
+  useEffect(() => {
+    if (!viewDirRef || !viewDirRequestId) return
 
-    anim.current = {
-      t: 0,
-      duration: 0.55,
-      fromPos: camera.position.clone(),
-      toPos,
-      fromTarget: controls?.target.clone() ?? center.clone(),
-      toTarget: center.clone(),
+    const lookTarget = new Vector3()
+    let distance = camera.position.distanceTo(controls?.target ?? lookTarget)
+
+    if (target) {
+      const box = new Box3().setFromObject(target)
+      if (!box.isEmpty()) {
+        box.getCenter(lookTarget)
+        const radius = Math.max(box.getBoundingSphere(new Sphere()).radius, 0.01)
+        const fov = 'fov' in camera ? ((camera.fov as number) * Math.PI) / 180 : Math.PI / 4
+        distance = (radius / Math.sin(fov / 2)) * 1.2
+      } else if (controls) {
+        lookTarget.copy(controls.target)
+      }
+    } else if (controls) {
+      lookTarget.copy(controls.target)
+      if (distance < 0.01) distance = 5
+    } else {
+      return
     }
 
-    if (controls) controls.enabled = false
-  }, [target, preset, requestId, camera, controls])
+    if (distance < 0.01) distance = 5
+    beginOrbitTo(viewDirRef.current, lookTarget, distance, 0.5)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewDirRequestId, viewDirRef, target, camera, controls])
 
   useFrame((_, delta) => {
     const current = anim.current
@@ -1304,6 +1323,9 @@ function Scene({
   solidCapEnabled,
   capColor,
   capsRevision,
+  orientationRef,
+  viewDirRef,
+  viewDirRequestId,
 }: {
   model: LoadedModel | null
   showHelpers: boolean
@@ -1327,6 +1349,9 @@ function Scene({
   solidCapEnabled: boolean
   capColor: string
   capsRevision: number
+  orientationRef: MutableRefObject<Quaternion>
+  viewDirRef: MutableRefObject<Vector3>
+  viewDirRequestId: number
 }) {
   const gridSize = useMemo(() => {
     if (!model) return 40
@@ -1396,22 +1421,11 @@ function Scene({
         requestId={cameraRequestId}
         focusObject={focusObject}
         focusRequestId={focusRequestId}
+        viewDirRef={viewDirRef}
+        viewDirRequestId={viewDirRequestId}
       />
       <OrbitControls makeDefault />
-
-      <GizmoHelper alignment="top-right" margin={[76, 76]} renderPriority={2}>
-        <group scale={2}>
-          <GizmoViewcube
-            faces={[...VIEWCUBE_FACES]}
-            color={VIEWCUBE_STYLE.color}
-            hoverColor={VIEWCUBE_STYLE.hoverColor}
-            textColor={VIEWCUBE_STYLE.textColor}
-            strokeColor={VIEWCUBE_STYLE.strokeColor}
-            opacity={VIEWCUBE_STYLE.opacity}
-            font={VIEWCUBE_STYLE.font}
-          />
-        </group>
-      </GizmoHelper>
+      <CameraOrientationPublisher orientationRef={orientationRef} />
     </>
   )
 }
@@ -1494,6 +1508,9 @@ export default function CADViewer() {
   const [isolatedPartId, setIsolatedPartId] = useState<string | null>(null)
   const [focusObject, setFocusObject] = useState<Object3D | null>(null)
   const [focusRequestId, setFocusRequestId] = useState(0)
+  const [viewDirRequestId, setViewDirRequestId] = useState(0)
+  const orientationRef = useRef(new Quaternion())
+  const viewDirRef = useRef(new Vector3(1, 1, 1).normalize())
   const dragDepth = useRef(0)
   const modelColorRef = useRef(modelColor)
   const pendingPointRef = useRef<[number, number, number] | null>(null)
@@ -1535,6 +1552,11 @@ export default function CADViewer() {
   const requestCameraView = useCallback((preset: ViewPreset) => {
     setViewPreset(preset)
     setCameraRequestId((id) => id + 1)
+  }, [])
+
+  const onViewCubeSelect = useCallback((direction: Vector3) => {
+    viewDirRef.current.copy(direction).normalize()
+    setViewDirRequestId((id) => id + 1)
   }, [])
 
   const applyModelTexture = useCallback(
@@ -1889,10 +1911,9 @@ export default function CADViewer() {
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      <div className="viewcube-frame" aria-hidden="true" />
-
       <Canvas
-        style={{ width: '100%', height: '100%' }}
+        className="main-viewport"
+        style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
         camera={{ position: [4, 4, 4], fov: 50 }}
         gl={{ antialias: true, localClippingEnabled: true, stencil: true }}
         onCreated={({ gl }) => {
@@ -1923,8 +1944,13 @@ export default function CADViewer() {
           solidCapEnabled={solidCapEnabled}
           capColor={capColor}
           capsRevision={capsRevision}
+          orientationRef={orientationRef}
+          viewDirRef={viewDirRef}
+          viewDirRequestId={viewDirRequestId}
         />
       </Canvas>
+
+      <ViewCube orientationRef={orientationRef} onSelectDirection={onViewCubeSelect} />
 
       <header className="cad-toolbar">
         <div className="tb-group">
