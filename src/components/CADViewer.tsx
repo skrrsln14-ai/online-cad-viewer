@@ -1995,6 +1995,8 @@ export default function CADViewer() {
   const [supportDensity, setSupportDensity] = useState(0.45)
   const [supportRadius, setSupportRadius] = useState(1.5)
   const [supportCount, setSupportCount] = useState(0)
+  const [toast, setToast] = useState<{ message: string; error?: boolean } | null>(null)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [cadLoading, setCadLoading] = useState(false)
   const [cadLoadProgress, setCadLoadProgress] = useState(0)
   const [cadLoadStage, setCadLoadStage] = useState('')
@@ -2024,6 +2026,18 @@ export default function CADViewer() {
   useEffect(() => {
     groundTextureRef.current = groundTexture
   }, [groundTexture])
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    }
+  }, [])
+
+  const showToast = useCallback((message: string, error = false) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    setToast({ message, error })
+    toastTimerRef.current = setTimeout(() => setToast(null), 4200)
+  }, [])
 
   useEffect(() => {
     return () => {
@@ -2469,14 +2483,13 @@ export default function CADViewer() {
     clearSupportPillars(root.parent ?? root)
     clearSupportPillars(root)
     setSupportCount(0)
-    setStatus('Destek çubukları temizlendi')
-  }, [])
+    showToast('Destek çubukları temizlendi')
+  }, [showToast])
 
   const createSupports = useCallback(() => {
     const root = modelRef.current?.root
     if (!root) return
     try {
-      // Attach beside model root so supports stay in scene space
       const parent = root.parent ?? root
       const { count } = generateSupportPillars(
         root,
@@ -2489,7 +2502,7 @@ export default function CADViewer() {
       )
       setSupportCount(count)
       setSupportPanelOpen(true)
-      setStatus(
+      showToast(
         count > 0
           ? `${count} destek çubuğu oluşturuldu (${supportAngle}° / Ø${supportRadius} mm)`
           : 'Destek gerektiren yüzey bulunamadı — açıyı düşürmeyi deneyin',
@@ -2497,8 +2510,9 @@ export default function CADViewer() {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Destek oluşturulamadı.'
       setError(message)
+      showToast(message, true)
     }
-  }, [supportAngle, supportDensity, supportRadius])
+  }, [supportAngle, supportDensity, supportRadius, showToast])
 
   const onModelInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -2550,7 +2564,7 @@ export default function CADViewer() {
 
   return (
     <div
-      className={`cad-viewer${measureMode ? ' is-measuring' : ''}${isCapturing ? ' is-capturing' : ''}`}
+      className={`cad-viewer${measureMode ? ' is-measuring' : ''}${isCapturing ? ' is-capturing' : ''}${hasAnimations ? ' has-anim-timeline' : ''}`}
       onDragEnter={onDragEnter}
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
@@ -2662,84 +2676,6 @@ export default function CADViewer() {
         <div className="tb-divider" />
 
         <div className="tb-group">
-          <span className="tb-label">Renk</span>
-          <label className="color-picker" title="Model rengi">
-            <input
-              type="color"
-              value={modelColor}
-              onChange={onModelColorChange}
-              disabled={!model}
-              aria-label="Model rengi"
-            />
-            <span>{modelColor}</span>
-          </label>
-        </div>
-
-        <div className="tb-divider" />
-
-        <div className="tb-group">
-          <span className="tb-label">Ölçüm</span>
-          <ToolbarButton
-            label="Ölçüm Yap"
-            active={measureMode}
-            onClick={toggleMeasureMode}
-            disabled={!model}
-            title="İki nokta arası mesafe ölç"
-          />
-          <ToolbarButton
-            label="Ölçümleri Temizle"
-            onClick={clearMeasurements}
-            disabled={measurements.length === 0 && !pendingPoint}
-          />
-        </div>
-
-        <div className="tb-divider" />
-
-        <div className="tb-group">
-          <span className="tb-label">Kesit</span>
-          <ToolbarButton
-            label="Kesit Al"
-            active={clipPanelOpen}
-            onClick={() => setClipPanelOpen((v) => !v)}
-            disabled={!model}
-            title="3D kesit paneli"
-          />
-        </div>
-
-        <div className="tb-divider" />
-
-        <div className="tb-group">
-          <span className="tb-label">Montaj</span>
-          <ToolbarButton
-            label="Montaj Ağacı"
-            active={treePanelOpen}
-            onClick={() => setTreePanelOpen((v) => !v)}
-            disabled={!model}
-            title="Parça listesi / gizle-göster"
-          />
-        </div>
-
-        <div className="tb-divider" />
-
-        <div className="tb-group">
-          <span className="tb-label">Kapsam</span>
-          <ToolbarButton
-            label="Kapsam: Model"
-            active={textureTarget === 'model'}
-            onClick={() => setTextureTarget('model')}
-            title="Kaplamayı modele uygula"
-          />
-          <ToolbarButton
-            label="Kapsam: Zemin"
-            active={textureTarget === 'ground'}
-            onClick={() => setTextureTarget('ground')}
-            title="Kaplamayı zemine uygula"
-          />
-        </div>
-
-        <div className="tb-divider" />
-
-        <div className="tb-group">
           <span className="tb-label">Görünüm</span>
           <ToolbarButton
             label="Katı"
@@ -2756,12 +2692,6 @@ export default function CADViewer() {
             active={viewMode === 'translucent'}
             onClick={() => onViewModeChange('translucent')}
           />
-        </div>
-
-        <div className="tb-divider" />
-
-        <div className="tb-group">
-          <span className="tb-label">Kamera</span>
           <ToolbarButton
             label="İzo"
             active={viewPreset === 'iso'}
@@ -2787,12 +2717,6 @@ export default function CADViewer() {
             onClick={() => requestCameraView('right')}
             disabled={!model}
           />
-        </div>
-
-        <div className="tb-divider" />
-
-        <div className="tb-group">
-          <span className="tb-label">Döndür</span>
           <ToolbarButton
             label="X 90°"
             onClick={() => onRotate('x')}
@@ -2811,43 +2735,68 @@ export default function CADViewer() {
             disabled={!model}
             title="Z ekseninde 90° döndür"
           />
-        </div>
-
-        <div className="tb-divider" />
-
-        <div className="tb-group">
-          <span className="tb-label">Baskı</span>
-          <ToolbarButton
-            label="Baskı Analizi"
-            active={printAnalysisActive}
-            onClick={togglePrintAnalysis}
-            disabled={!model}
-            title="Ters açı / destek analizi ve katman dilimleme"
-          />
-          <ToolbarButton
-            label="Destek Çubuğu Ekle"
-            active={supportPanelOpen}
-            onClick={() => {
-              setSupportPanelOpen(true)
-              createSupports()
-            }}
-            disabled={!model}
-            title="Otomatik destek çubuğu oluştur"
-          />
-        </div>
-
-        <div className="tb-divider" />
-
-        <div className="tb-group">
-          <span className="tb-label">Sahne</span>
           <ToolbarButton
             label={showHelpers ? 'Grid Açık' : 'Grid Kapalı'}
             active={showHelpers}
             onClick={() => setShowHelpers((v) => !v)}
             title="Grid ve eksenleri aç/kapat"
           />
+        </div>
+
+        <div className="tb-divider" />
+
+        <div className="tb-group">
+          <span className="tb-label">CAD Araçları</span>
+          <label className="color-picker" title="Model rengi">
+            <input
+              type="color"
+              value={modelColor}
+              onChange={onModelColorChange}
+              disabled={!model}
+              aria-label="Model rengi"
+            />
+            <span>{modelColor}</span>
+          </label>
+          <ToolbarButton
+            label="Ölçüm Yap"
+            active={measureMode}
+            onClick={toggleMeasureMode}
+            disabled={!model}
+            title="İki nokta arası mesafe ölç"
+          />
+          <ToolbarButton
+            label="Ölçümleri Temizle"
+            onClick={clearMeasurements}
+            disabled={measurements.length === 0 && !pendingPoint}
+          />
+          <ToolbarButton
+            label="Kesit Al"
+            active={clipPanelOpen}
+            onClick={() => setClipPanelOpen((v) => !v)}
+            disabled={!model}
+            title="3D kesit paneli"
+          />
+          <ToolbarButton
+            label="Montaj Ağacı"
+            active={treePanelOpen}
+            onClick={() => setTreePanelOpen((v) => !v)}
+            disabled={!model}
+            title="Parça listesi / gizle-göster"
+          />
+          <ToolbarButton
+            label="Kapsam: Model"
+            active={textureTarget === 'model'}
+            onClick={() => setTextureTarget('model')}
+            title="Kaplamayı modele uygula"
+          />
+          <ToolbarButton
+            label="Kapsam: Zemin"
+            active={textureTarget === 'ground'}
+            onClick={() => setTextureTarget('ground')}
+            title="Kaplamayı zemine uygula"
+          />
           <label className="tb-select" title="HDRI stüdyo ortamı">
-            <span className="tb-select-label">Stüdyo / Işık</span>
+            <span className="tb-select-label">Stüdyo</span>
             <select
               value={studioEnv}
               onChange={(e) => setStudioEnv(e.target.value as StudioEnvId)}
@@ -2874,12 +2823,41 @@ export default function CADViewer() {
           />
         </div>
 
-        {(status || error) && (
-          <div className="tb-status">
-            {error ? <span className="is-error">{error}</span> : <span>{status}</span>}
-          </div>
-        )}
+        <div className="tb-divider" />
+
+        <div className="tb-group">
+          <span className="tb-label">3D Baskı</span>
+          <ToolbarButton
+            label="Baskı Analizi"
+            active={printAnalysisActive}
+            onClick={togglePrintAnalysis}
+            disabled={!model}
+            title="Ters açı / destek analizi ve katman dilimleme"
+          />
+          <ToolbarButton
+            label="Destek Çubuğu Ekle"
+            active={supportPanelOpen}
+            onClick={() => {
+              setSupportPanelOpen(true)
+              createSupports()
+            }}
+            disabled={!model}
+            title="Otomatik destek çubuğu oluştur"
+          />
+        </div>
       </header>
+
+      {toast && (
+        <div className={`ui-toast${toast.error ? ' is-error' : ''}`} role="status" aria-live="polite">
+          {toast.message}
+        </div>
+      )}
+
+      {!toast && !cadLoading && (error || status) && (
+        <div className={`ui-toast${error ? ' is-error' : ''}`} role="status" aria-live="polite">
+          {error ?? status}
+        </div>
+      )}
 
       {printAnalysisActive && model && (
         <aside className="print-layer-panel" aria-label="Katman yüksekliği">
