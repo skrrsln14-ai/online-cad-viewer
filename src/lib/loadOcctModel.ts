@@ -3,11 +3,8 @@ import {
   BufferAttribute,
   BufferGeometry,
   Color,
-  EdgesGeometry,
   Float32BufferAttribute,
   Group,
-  LineBasicMaterial,
-  LineSegments,
   Mesh,
   MeshStandardMaterial,
   Object3D,
@@ -38,15 +35,12 @@ export type OcctModule = {
   ReadIgesFile: (buffer: Uint8Array, params: unknown) => OcctImportResult
 }
 
+/** Light aluminum / studio CAD default (edges added in CADViewer.wrapLoadedObject). */
 const BASE = {
-  color: '#9a9a9a',
-  metalness: 0.75,
-  roughness: 0.35,
+  color: '#d0d7de',
+  metalness: 0.2,
+  roughness: 0.5,
 } as const
-
-/** Threshold in degrees — lower = more edges, higher = only sharp creases. */
-const EDGE_THRESHOLD_DEG = 35
-const EDGE_COLOR = '#0d0d0d'
 
 let occtReady: Promise<OcctModule> | null = null
 
@@ -146,22 +140,6 @@ function centerAssembliesAtOrigin(root: Object3D) {
   })
 }
 
-function createCadEdgeLines(geometry: BufferGeometry): LineSegments {
-  const edges = new EdgesGeometry(geometry, EDGE_THRESHOLD_DEG)
-  const lines = new LineSegments(
-    edges,
-    new LineBasicMaterial({
-      color: EDGE_COLOR,
-      transparent: true,
-      opacity: 0.9,
-      depthTest: true,
-    }),
-  )
-  lines.renderOrder = 2
-  lines.name = 'cad-edges'
-  return lines
-}
-
 function buildPartFromOcct(meshData: OcctMeshData): Group {
   const { geometry, materials } = buildGeometryFromOcct(meshData)
   const mesh = new Mesh(geometry, materials.length > 1 ? materials : materials[0])
@@ -182,8 +160,8 @@ export function isOcctCadFile(filename: string): boolean {
 }
 
 /**
- * Parse STEP/IGES via OpenCascade WASM and return a Three.js object
- * with solid meshes + sharp CAD edge outlines.
+ * Parse STEP/IGES via OpenCascade WASM and return a Three.js object.
+ * CAD edge outlines are attached later in CADViewer.wrapLoadedObject.
  */
 export async function loadOcctContent(file: File): Promise<Object3D> {
   const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
@@ -202,22 +180,10 @@ export async function loadOcctContent(file: File): Promise<Object3D> {
   const group = new Group()
   group.name = file.name
 
-  const parts: Group[] = []
   for (const meshData of result.meshes) {
-    const part = buildPartFromOcct(meshData)
-    parts.push(part)
-    group.add(part)
+    group.add(buildPartFromOcct(meshData))
   }
 
-  // Align assembly to origin (equivalent to geometry.center() for multi-body files)
   centerAssembliesAtOrigin(group)
-
-  // Technical CAD outlines after centering so edges match the solid
-  for (const part of parts) {
-    const mesh = part.children.find((c) => (c as Mesh).isMesh) as Mesh | undefined
-    if (!mesh) continue
-    part.add(createCadEdgeLines(mesh.geometry))
-  }
-
   return group
 }

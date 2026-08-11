@@ -13,7 +13,9 @@ import {
   Box3,
   BufferAttribute,
   BufferGeometry,
+  EdgesGeometry,
   Group,
+  LineBasicMaterial,
   LineSegments,
   Material,
   Mesh,
@@ -25,6 +27,7 @@ import {
   Texture,
   TextureLoader,
   Vector3,
+  DirectionalLight,
 } from 'three'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
@@ -57,10 +60,13 @@ type OrbitControlsLike = {
 }
 
 const BASE_MATERIAL = {
-  color: '#9a9a9a',
-  metalness: 0.75,
-  roughness: 0.35,
+  color: '#d0d7de',
+  metalness: 0.2,
+  roughness: 0.5,
 } as const
+
+const EDGE_THRESHOLD_DEG = 35
+const EDGE_COLOR = '#1a1a1a'
 
 const MODEL_EXTENSIONS = ['.stl', '.obj', '.step', '.stp', '.iges', '.igs'] as const
 const TEXTURE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'] as const
@@ -90,6 +96,31 @@ function isTextureFile(file: File): boolean {
 
 function createMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({ ...BASE_MATERIAL })
+}
+
+function attachCadEdges(mesh: Mesh) {
+  if (mesh.getObjectByName('cad-edges')) return
+  const lines = new LineSegments(
+    new EdgesGeometry(mesh.geometry, EDGE_THRESHOLD_DEG),
+    new LineBasicMaterial({
+      color: EDGE_COLOR,
+      transparent: true,
+      opacity: 0.88,
+      depthTest: true,
+    }),
+  )
+  lines.name = 'cad-edges'
+  lines.renderOrder = 2
+  mesh.add(lines)
+}
+
+/** Add dark CAD edge outlines to every mesh (holes, fillets, transitions). */
+function addCadEdgeOutlines(root: Object3D) {
+  const meshes: Mesh[] = []
+  root.traverse((child) => {
+    if ((child as Mesh).isMesh) meshes.push(child as Mesh)
+  })
+  for (const mesh of meshes) attachCadEdges(mesh)
 }
 
 function applyBaseMaterial(root: Object3D) {
@@ -155,6 +186,7 @@ function wrapLoadedObject(object: Object3D): Group {
   const root = new Group()
   root.add(content)
   alignToGround(root)
+  addCadEdgeOutlines(root)
   return root
 }
 
@@ -309,7 +341,7 @@ function applyTextureToModel(root: Object3D, texture: Texture) {
       }
       mat.map = texture
       mat.color.set('#ffffff')
-      mat.metalness = Math.min(mat.metalness, 0.35)
+      mat.metalness = Math.min(mat.metalness, 0.25)
       mat.roughness = Math.max(mat.roughness, 0.45)
       mat.needsUpdate = true
     })
@@ -483,6 +515,67 @@ function GroundPlane({
   )
 }
 
+function KeyLightFollowCamera({ intensity = 2.5 }: { intensity?: number }) {
+  const lightRef = useRef<DirectionalLight>(null)
+  const camera = useThree((state) => state.camera)
+  const controls = useThree((state) => state.controls) as OrbitControlsLike | null
+  const lookTarget = useRef(new Vector3())
+  const toCamera = useRef(new Vector3())
+  const right = useRef(new Vector3())
+  const camUp = useRef(new Vector3())
+
+  useFrame(() => {
+    const light = lightRef.current
+    if (!light) return
+
+    if (controls?.target) {
+      lookTarget.current.copy(controls.target)
+    } else {
+      lookTarget.current.set(0, 0, 0)
+    }
+
+    toCamera.current.copy(camera.position).sub(lookTarget.current)
+    const distance = Math.max(toCamera.current.length(), 1)
+
+    right.current.crossVectors(toCamera.current, new Vector3(0, 1, 0))
+    if (right.current.lengthSq() < 1e-6) {
+      right.current.set(1, 0, 0)
+    } else {
+      right.current.normalize()
+    }
+    camUp.current.crossVectors(right.current, toCamera.current).normalize()
+    toCamera.current.normalize()
+
+    // Studio key: upper-left relative to the current view
+    light.position
+      .copy(lookTarget.current)
+      .addScaledVector(toCamera.current, distance * 0.25)
+      .addScaledVector(right.current, -distance * 0.55)
+      .addScaledVector(camUp.current, distance * 0.85)
+
+    light.target.position.copy(lookTarget.current)
+    light.target.updateMatrixWorld()
+  })
+
+  return (
+    <directionalLight ref={lightRef} intensity={intensity} color="#ffffff" castShadow>
+      <object3D attach="target" />
+    </directionalLight>
+  )
+}
+
+function StudioLights() {
+  return (
+    <>
+      <ambientLight intensity={1.75} color="#ffffff" />
+      <hemisphereLight args={['#ffffff', '#444444', 1.0]} />
+      <KeyLightFollowCamera intensity={2.5} />
+      {/* Fill — softens shadows from camera-right / back */}
+      <directionalLight position={[-100, 100, -100]} intensity={1.5} color="#ffffff" />
+    </>
+  )
+}
+
 function Scene({
   model,
   showHelpers,
@@ -504,9 +597,7 @@ function Scene({
 
   return (
     <>
-      <ambientLight intensity={0.45} />
-      <directionalLight position={[6, 10, 4]} intensity={1.15} />
-      <directionalLight position={[-4, 3, -6]} intensity={0.35} />
+      <StudioLights />
 
       <GroundPlane size={gridSize} texture={groundTexture} />
 
