@@ -43,9 +43,9 @@ export type OcctLoadProgress = {
 
 /** Light aluminum / studio CAD default (edges added in CADViewer.wrapLoadedObject). */
 const BASE = {
-  color: '#c0c6cc',
-  metalness: 0.2,
-  roughness: 0.5,
+  color: '#d0d7de',
+  metalness: 0.18,
+  roughness: 0.48,
 } as const
 
 let worker: Worker | null = null

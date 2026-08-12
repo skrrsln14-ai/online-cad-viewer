@@ -102,14 +102,14 @@ type OrbitControlsLike = {
 }
 
 const BASE_MATERIAL = {
-  color: '#c0c6cc',
-  metalness: 0.2,
-  roughness: 0.5,
+  color: '#d0d7de',
+  metalness: 0.18,
+  roughness: 0.48,
 } as const
 
-const EDGE_THRESHOLD_DEG = 35
-const EDGE_COLOR = '#1a1a1a'
-const DEFAULT_MODEL_COLOR = '#c0c6cc'
+const EDGE_THRESHOLD_DEG = 30
+const EDGE_COLOR = '#1f2429'
+const DEFAULT_MODEL_COLOR = '#d0d7de'
 const OVERHANG_ANGLE_DEG = 45
 /** Faces with worldNormal·up below this need support (downward past 45°). */
 const OVERHANG_DOT_THRESHOLD = Math.cos(((90 + OVERHANG_ANGLE_DEG) * Math.PI) / 180)
@@ -656,8 +656,12 @@ function attachCadEdges(mesh: Mesh) {
     new LineBasicMaterial({
       color: EDGE_COLOR,
       transparent: true,
-      opacity: 0.88,
+      opacity: 0.72,
       depthTest: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
     }),
   )
   lines.name = 'cad-edges'
@@ -1399,7 +1403,7 @@ function KeyLightFollowCamera({ intensity = 2.5 }: { intensity?: number }) {
 function StudioLights({ hdriActive }: { hdriActive: boolean }) {
   return (
     <>
-      <ambientLight intensity={hdriActive ? 0.4 : 1.8} color="#ffffff" />
+      <ambientLight intensity={hdriActive ? 0.55 : 2.35} color="#ffffff" />
       <KeyLightFollowCamera intensity={hdriActive ? 1.0 : 2.5} />
       <directionalLight
         position={[-100, 100, -100]}
@@ -2434,6 +2438,23 @@ export default function CADViewer() {
     requestCameraView(viewPreset)
   }
 
+  /** Seat BoundingBox.min.y on the ground plane (y = 0). */
+  const onAlignToGround = () => {
+    if (!model) return
+    alignToGround(model.root)
+    const next: LoadedModel = {
+      ...model,
+      stats: computeStats(model.root),
+    }
+    if (printAnalysisActive) {
+      applyPrintOverhangAnalysis(next.root)
+    }
+    const bounds = getObjectClipBounds(next.root)
+    setPrintLayerHeight((h) => Math.min(bounds.max.y, Math.max(bounds.min.y, h)))
+    setModel({ ...next })
+    setStatus('Model zemine oturtuldu')
+  }
+
   const onAnimTimeUpdate = useCallback((time: number) => {
     animTimeRef.current = time
     if (animScrubbing) return
@@ -2736,12 +2757,17 @@ export default function CADViewer() {
             title="Z ekseninde 90° döndür"
           />
           <ToolbarButton
+            label="Zemine Oturt"
+            onClick={onAlignToGround}
+            disabled={!model}
+            title="Modelin en altını y = 0 zemin grid’ine oturt"
+          />
+          <ToolbarButton
             label={showHelpers ? 'Grid Açık' : 'Grid Kapalı'}
             active={showHelpers}
             onClick={() => setShowHelpers((v) => !v)}
             title="Grid ve eksenleri aç/kapat"
-          />
-        </div>
+          />        </div>
 
         <div className="tb-divider" />
 
