@@ -2214,11 +2214,7 @@ export default function CADViewer() {
           }
           return loaded
         })
-        setStatus(
-          loaded.animations.length > 0
-            ? `${file.name} · ${loaded.animations.length} animasyon`
-            : file.name,
-        )
+        setStatus(null)
         setViewPreset('iso')
         setCameraRequestId((id) => id + 1)
       } catch (err) {
@@ -3265,11 +3261,22 @@ export default function CADViewer() {
       )}
 
       {!isDragging && (
-        <p className="empty-hint">
-          STL / OBJ / GLTF / GLB / STEP / IGES modellerinizi veya kaplamak istediğiniz Görsel
-          (JPG/PNG) dosyalarını buraya sürükleyin. Kaplama hedefi:{' '}
-          {textureTarget === 'ground' ? 'Zemin' : 'Model'}.
-        </p>
+        <div className="empty-hint">
+          {model && (
+            <span className="empty-hint-badge" title={model.name}>
+              {model.animations.length > 0
+                ? `${model.name} · ${model.animations.length} animasyon`
+                : model.name}
+            </span>
+          )}
+          {!model && (
+            <p className="empty-hint-text">
+              STL / OBJ / GLTF / GLB / STEP / IGES modellerinizi veya kaplamak istediğiniz Görsel
+              (JPG/PNG) dosyalarını buraya sürükleyin. Kaplama hedefi:{' '}
+              {textureTarget === 'ground' ? 'Zemin' : 'Model'}.
+            </p>
+          )}
+        </div>
       )}
     </div>
   )
